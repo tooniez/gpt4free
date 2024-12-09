@@ -9,11 +9,11 @@ from ..bing.create_images import create_images, create_session
 
 class BingCreateImages(AsyncGeneratorProvider, ProviderModelMixin):
     label = "Microsoft Designer in Bing"
-    parent = "Bing"
     url = "https://www.bing.com/images/create"
     working = True
     needs_auth = True
-    image_models = ["dall-e"]
+    image_models = ["dall-e-3"]
+    models = image_models
 
     def __init__(self, cookies: Cookies = None, proxy: str = None, api_key: str = None) -> None:
         if api_key is not None:
@@ -28,13 +28,14 @@ class BingCreateImages(AsyncGeneratorProvider, ProviderModelMixin):
         cls,
         model: str,
         messages: Messages,
+        prompt: str = None,
         api_key: str = None,
         cookies: Cookies = None,
         proxy: str = None,
         **kwargs
     ) -> AsyncResult:
         session = BingCreateImages(cookies, proxy, api_key)
-        yield await session.generate(messages[-1]["content"])
+        yield await session.generate(messages[-1]["content"] if prompt is None else prompt)
 
     async def generate(self, prompt: str) -> ImageResponse:
         """
