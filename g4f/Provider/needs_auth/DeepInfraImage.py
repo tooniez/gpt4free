@@ -29,9 +29,10 @@ class DeepInfraImage(AsyncGeneratorProvider, ProviderModelMixin):
         cls,
         model: str,
         messages: Messages,
+        prompt: str = None,
         **kwargs
     ) -> AsyncResult:
-        yield await cls.create_async(messages[-1]["content"], model, **kwargs)
+        yield await cls.create_async(messages[-1]["content"] if prompt is None else prompt, model, **kwargs)
 
     @classmethod
     async def create_async(
@@ -73,7 +74,7 @@ class DeepInfraImage(AsyncGeneratorProvider, ProviderModelMixin):
             async with session.post(f"{api_base.rstrip('/')}/{model}", json=data) as response:
                 await raise_for_status(response)
                 data = await response.json()
-                images = data["output"] if "output" in data else data["images"]
+                images = data.get("output", data.get("images", data.get("image_url")))
                 if not images:
                     raise RuntimeError(f"Response: {data}")
                 images = images[0] if len(images) == 1 else images

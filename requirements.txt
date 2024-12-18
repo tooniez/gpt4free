@@ -4,7 +4,6 @@ curl_cffi>=0.6.2
 aiohttp
 certifi
 browser_cookie3
-PyExecJS
 duckduckgo-search>=5.0
 nest_asyncio
 werkzeug
@@ -20,4 +19,4 @@ pywebview
 plyer
 cryptography
 nodriver
-cloudscraper
+python-multipart
