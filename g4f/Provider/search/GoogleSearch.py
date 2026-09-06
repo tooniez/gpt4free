@@ -32,7 +32,7 @@ class GoogleSearch(AsyncGeneratorProvider, ProviderModelMixin):
         search_url = f"{cls.url}/search?q={urllib.parse.quote_plus(query)}"
 
         debug.log(f"Google Search: Starting CDPSession for query: {query}")
-        session = CDPSession(headless=False)
+        session = CDPSession(headless=True)
         await session.start()
 
         try:
@@ -42,12 +42,12 @@ class GoogleSearch(AsyncGeneratorProvider, ProviderModelMixin):
             await session.close()
             raise e
 
-        # Enable AI mode if the model is like "ai"
+        # Enable AI mode if model is ai-mode
         try:
             if model == "ai-mode":
                 await session.wait_for_network_idle(idle_time=1, timeout=10.0)
                 for _ in range(10):
-                    result = await session.evaluate_js("""const b =Array.from(document.querySelectorAll("a, button")).filter(a=>a.textContent.endsWith("KI‑Modus")).pop(); b ? b.click() : null; !!b""")
+                    result = await session.evaluate_js("""const b =Array.from(document.querySelectorAll("a, button")).filter(a=>a.textContent.endsWith("KI‑Modus") || a.textContent.endsWith("AI-Mode")).pop(); b ? b.click() : null; !!b""")
                     debug.log(f"Google Search: Attempted #{_+1} to enable AI mode, result: {result}")
                     await asyncio.sleep(1)
                     if not result:
@@ -74,7 +74,7 @@ for (const nodes of Array.from(document.querySelector('[decode-data-ved="1"]').q
     for (const node of nodes) {result.push(node)} 
 }
 
-const lines = result.map(n=>n.textContent).filter(c=>!c.startsWith('TgQPHd|'));
+const lines = result.map(n=>n.textContent);
 const keepLines = { };
 
 for (let l of lines) {
@@ -86,7 +86,7 @@ for (let l of lines) {
     const imgMatch = l.match(/_setImageSrc\\([^,]+,\\s*'([^']+)'\\)/);
     if (imgMatch) {
         // Bereinigt eventuelle doppelte Backslashes aus dem Daten-String (z.B. data:image\\/png)
-        l = `\\n![](${imgMatch[1]})`;
+        l = `\\n![](${(imgMatch[1]).replaceAll('\\', '')})`;
     }
     const fileMath = l.match(/\\[\\{.+\\]^/);
     if (fileMath) {
