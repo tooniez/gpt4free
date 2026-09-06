@@ -311,6 +311,7 @@ class AsyncGeneratorProvider(AbstractProvider):
     use_stream_timeout = True
     quota_url = None
     quota_lock = threading.Lock()
+    default_reasoning_effort = "none"
 
     @classmethod
     async def get_quota(cls, api_key: Optional[str] = None, **kwargs) -> dict:
@@ -323,7 +324,7 @@ class AsyncGeneratorProvider(AbstractProvider):
                         model=getattr(cls, "default_model", "auto"),
                         messages=[{"role": "user", "content": "Hi"}],
                         stream=False,
-                        reasoning_effort="none",
+                        reasoning_effort=cls.default_reasoning_effort,
                         **kwargs,
                     ):
                         if isinstance(chunk, str):

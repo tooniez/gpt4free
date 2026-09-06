@@ -24,7 +24,7 @@ class Ollama(OpenaiTemplate):
     active_by_default = True
     local_models: list[str] = []
     model_aliases = {"gpt-oss-120b": "gpt-oss:120b", "gpt-oss-20b": "gpt-oss:20b"}
-    supports_reasoning_effort_none = False
+    default_reasoning_effort = False
 
     @classmethod
     async def get_quota(cls, api_key: Optional[str] = None) -> Optional[dict]:
@@ -32,7 +32,7 @@ class Ollama(OpenaiTemplate):
             "__Secure-session"
         )
         if not session_cookie:
-            return await super().get_quota(api_key=api_key)
+            return await super().get_quota(api_key=api_key, reasoning_effort=cls.default_reasoning_effort)
         quota = {}
         try:
             async with StreamSession() as session:
