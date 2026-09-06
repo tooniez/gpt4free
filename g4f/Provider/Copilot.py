@@ -94,6 +94,7 @@ class Copilot(AsyncAuthedProvider, ProviderModelMixin):
 
     working = True
     use_nodriver = has_nodriver
+    needs_auth = True
 
     default_model = "Copilot"
     models = [default_model, "Think Deeper", "Smart (GPT-5)", "Study"]

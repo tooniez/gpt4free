@@ -5,6 +5,7 @@ import random
 from abc import abstractmethod
 import json
 from inspect import signature, Parameter
+import threading
 from typing import Optional, _GenericAlias, AsyncIterator
 from pathlib import Path
 from aiohttp import ClientSession
@@ -309,11 +310,26 @@ class AsyncGeneratorProvider(AbstractProvider):
     supports_stream = True
     use_stream_timeout = True
     quota_url = None
+    quota_lock = threading.Lock()
 
     @classmethod
     async def get_quota(cls, api_key: Optional[str] = None, **kwargs) -> dict:
         """Get the quota information for the API key."""
         if cls.quota_url is None:
+            if not getattr(cls, "use_nodriver", False) or not cls.needs_auth:
+                with cls.quota_lock:
+                    chunks = []
+                    async for chunk in cls.create_async_generator(
+                        model=getattr(cls, "default_model", "auto"),
+                        messages=[{"role": "user", "content": "Hi"}],
+                        stream=False,
+                        reasoning_effort="none",
+                        **kwargs,
+                    ):
+                        if isinstance(chunk, str):
+                            chunks.append(chunk)
+                    if chunks:
+                        return {"choices": [{"message": {"content": "".join(chunks)}}]}
             raise NotImplementedError(
                 f"{cls.__name__} does not implement get_quota method"
             )

@@ -594,6 +594,8 @@ class Backend_Api(Api):
                 }
             )
 
+        quota_cache = {}
+
         @app.route("/backend-api/v2/quota/<provider>", methods=["GET"])
         async def get_quota(provider: str):
             try:
@@ -609,9 +611,13 @@ class Backend_Api(Api):
                 )
             request_api_key = request.headers.get("x-api-key")
             try:
-                return jsonify(
-                    await provider_handler.get_quota(api_key=request_api_key)
-                )
+                result = await provider_handler.get_quota(api_key=request_api_key)
+                if result is None:
+                    return jsonify({"error": {"message": "Quota information not available"}}), 404
+                quota_cache[provider] = result 
+                response = jsonify(result)
+                response.headers["cache-control"] = "public, max-age=3600"
+                return response
             except MissingAuthError as e:
                 return jsonify({"error": {"message": f"{type(e).__name__}: {e}"}}), 401
             except NotImplementedError as e:

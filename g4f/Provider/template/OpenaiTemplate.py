@@ -33,6 +33,7 @@ class OpenaiTemplate(AsyncGeneratorProvider, ProviderModelMixin, RaiseErrorMixin
     max_tokens: int = None
     supports_native_tools: bool = True
     _checked_api_keys: dict = {}
+    add_thought_signature = None
 
     @classmethod
     async def get_quota(cls, api_key: Optional[str] = None, **kwargs) -> dict:
@@ -50,7 +51,7 @@ class OpenaiTemplate(AsyncGeneratorProvider, ProviderModelMixin, RaiseErrorMixin
             return await super().get_quota(api_key=api_key, **kwargs)
         if not api_key and cls.needs_auth:
             raise MissingAuthError("API key is required.")
-        if not cls.default_model:
+        if not cls.default_model and not cls.backup_url:
             raise NotImplementedError("No default model specified.")
         return await cls.test_api_key(api_key)
 
@@ -61,9 +62,10 @@ class OpenaiTemplate(AsyncGeneratorProvider, ProviderModelMixin, RaiseErrorMixin
         url = f"{cls.base_url}/chat/completions"
         headers = {"authorization": f"Bearer {api_key}"} if api_key else {}
         json_data = {
-            "model": cls.default_model,
-            "messages": [{"role": "user", "content": "say only okay"}],
+            **({"model": cls.default_model} if cls.default_model else {}),
+            "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 1,
+            "reasoning_effort": "none",
         }
         async with StreamSession() as session:
             async with session.post(url, headers=headers, json=json_data) as response:
@@ -226,6 +228,20 @@ class OpenaiTemplate(AsyncGeneratorProvider, ProviderModelMixin, RaiseErrorMixin
     ) -> AsyncResult:
         if api_key is None and cls.api_key is not None:
             api_key = cls.api_key
+        if base_url is None:
+            if cls.is_provider_api_key(api_key):
+                base_url = cls.base_url
+            else:
+                if cls.backup_url is None:
+                    base_url = cls.base_url
+                else:
+                    base_url = cls.backup_url
+                if not base_url.startswith(SPACE_URL):
+                    api_key = None
+            if base_url is None:
+                raise NotImplementedError(
+                    "No base_url or backup_url specified."
+                )
         if cls.needs_auth and api_key is None:
             raise MissingAuthError('Add a "api_key"')
         async with StreamSession(
@@ -234,20 +250,6 @@ class OpenaiTemplate(AsyncGeneratorProvider, ProviderModelMixin, RaiseErrorMixin
             impersonate=impersonate,
         ) as session:
             model = cls.get_model(model, api_key=api_key, base_url=base_url)
-            if base_url is None:
-                if cls.is_provider_api_key(api_key):
-                    base_url = cls.base_url
-                else:
-                    if cls.backup_url is None:
-                        base_url = cls.base_url
-                    else:
-                        base_url = cls.backup_url
-                    if not base_url.startswith(SPACE_URL):
-                        api_key = None
-                if base_url is None:
-                    raise NotImplementedError(
-                        "No base_url or backup_url specified."
-                    )
 
             # Proxy for image generation feature
             if model and model in cls.image_models or prompt:
@@ -303,6 +305,24 @@ class OpenaiTemplate(AsyncGeneratorProvider, ProviderModelMixin, RaiseErrorMixin
                         prompt,
                     )
                 return
+
+            if cls.add_thought_signature or "gemini" in model:
+                for msg in messages:
+                    if msg["role"] == "assistant" and msg.get("tool_calls"):
+                        parts = []
+                        content = msg.get("content")
+                        if isinstance(content, str) and content.strip():
+                            parts.append({"text": content})
+                        for tool_call in msg["tool_calls"]:
+                            if tool_call.get("type") == "function":
+                                if "extra_content" not in tool_call:
+                                    tool_call["extra_content"] = {}
+                                if "google" not in tool_call["extra_content"]:
+                                    tool_call["extra_content"]["google"] = {}
+                                if "thought_signature" not in tool_call.get("extra_content", {}).get("google", {}):
+                                    tool_call["extra_content"]["google"][
+                                        "thought_signature"
+                                    ] = "skip_thought_signature_validator"
 
             if stream or stream is None:
                 kwargs.setdefault("stream_options", {"include_usage": True})

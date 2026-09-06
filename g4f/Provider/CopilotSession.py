@@ -54,6 +54,7 @@ class CopilotSession(AsyncAuthedProvider, ProviderModelMixin):
 
     working = has_nodriver
     use_nodriver = has_nodriver
+    needs_auth = True
     active_by_default = True
     use_stream_timeout = False
 

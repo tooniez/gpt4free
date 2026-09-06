@@ -48,6 +48,7 @@ Common features:
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -57,6 +58,10 @@ import subprocess
 import time
 import urllib.request
 from typing import Optional, Dict, Any, List
+import re
+import hashlib
+from urllib.parse import urlparse
+import datetime
 
 try:
     import aiohttp
@@ -65,7 +70,39 @@ except ImportError:
 
 from ..cookies import BrowserConfig
 
+try:
+    from PIL import Image
+    has_pillow = True
+except ImportError:
+    has_pillow = False
+
 logger = logging.getLogger(__name__)
+
+from pathlib import Path
+
+def secure_filename(url: str) -> str:
+    """Create a secure filename from a URL."""
+    parsed = urlparse(url)
+    path = parsed.path
+    if path:
+        filename = os.path.basename(path)
+        if filename:
+            return filename
+    return hashlib.sha256(url.encode()).hexdigest() + ".png"
+
+def get_screenshot_dir(datekey: str = None) -> str:
+    """Get the screenshot directory, creating it if necessary."""
+    try:
+        from g4f.image.copy_images import get_media_dir
+        media_dir = get_media_dir()
+    except ImportError:
+        import tempfile
+        media_dir = os.path.join(tempfile.gettempdir(), "g4f_media")
+    screenshots_dir = os.path.join(media_dir, "screenshots")
+    if datekey:
+        screenshots_dir = os.path.join(screenshots_dir, datekey)
+    os.makedirs(screenshots_dir, exist_ok=True)
+    return screenshots_dir
 
 
 def find_chrome_path() -> Optional[str]:
@@ -249,7 +286,7 @@ def get_shared_browser(host: str, preferred_port: int, headless: bool = True) ->
             chrome_path,
             f"--remote-debugging-port={port}",
             f"--user-data-dir={user_data_dir}",
-            "--window-size=1920,1080",
+            "--window-size=1280,720",
             "--no-default-browser-check",
             "--disable-suggestions-ui",
             "--no-first-run",
@@ -594,6 +631,37 @@ class CDPSession:
             logger.debug(f"Failed to auto-click Turnstile: {e}")
         return False
 
+    async def click_accept_button(self) -> bool:
+        """Find and click an 'Accept' or 'Einwilligen' button."""
+        js_code = """
+        (() => {
+            const buttons = document.querySelectorAll('button, input[type="submit"]');
+            for (let button of buttons) {
+                const text = button.textContent.trim();
+                if (text === 'Accept' || text === 'Einwilligen' || text === 'Alle akzeptieren') {
+                    const rect = button.getBoundingClientRect();
+                    return {
+                        x: rect.left + window.scrollX,
+                        y: rect.top + window.scrollY,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                }
+            }
+            return null;
+        })()
+        """
+        try:
+            rect = await self.evaluate_js(js_code)
+            if rect and isinstance(rect, dict) and rect.get("width", 0) > 0:
+                center_x = int(rect["x"] + rect["width"] / 2)
+                center_y = int(rect["y"] + rect["height"] / 2)
+                await self.click(center_x, center_y)
+                return True
+        except Exception as e:
+            logger.debug(f"Failed to click accept button: {e}")
+        return False
+
     async def bypass_turnstile(self):
         """Execute a sequence of anti-detect actions to bypass Cloudflare Turnstile."""
         import random
@@ -636,8 +704,39 @@ class CDPSession:
             await self.call("Network.enable")
             await self.call("Runtime.enable")
 
+    async def capture_screenshot(self, url: str) -> bytes:
+        """Navigate to a URL and capture a screenshot, caching the result."""
+        datekey = datetime.date.today().isoformat()
+        screenshot_dir = get_screenshot_dir(datekey)
+        filename = secure_filename(url)
+        filepath = os.path.join(screenshot_dir, filename)
+
+        if os.path.exists(filepath):
+            return Path(filepath).read_bytes()
+
+        await self.navigate(url)
+        # Try to click any "Accept" or "Einwilligen" cookie consent buttons
+        await self.click_accept_button()
+        await asyncio.sleep(0.5)
+        result = await self.call("Page.captureScreenshot")
+        image_bytes = base64.b64decode(result["data"])
+        
+        # Resize to 1200x675
+        if has_pillow:
+            from io import BytesIO
+            image = Image.open(BytesIO(image_bytes))
+            image = image.resize((1200, 675), Image.Resampling.LANCZOS)
+            width, height = image.size
+            image = image.crop((0, 0, max(0, width - 16), height))
+            output = BytesIO()
+            image.save(output, format="PNG")
+            image_bytes = output.getvalue()
+        
+        Path(filepath).write_bytes(image_bytes)
+        return image_bytes
+
     async def close(self):
-        """Close WebSocket session and close the specific target tab."""
+        """Close WebSocket session, close the specific target tab, and close the browser."""
         self._closing = True
 
         if self._receive_task:
@@ -663,6 +762,15 @@ class CDPSession:
             except Exception:
                 pass
             self.target_id = None
+
+        # Close the browser process
+        global _shared_browser_process
+        if _shared_browser_process:
+            try:
+                _shared_browser_process.terminate()
+            except Exception:
+                pass
+            _shared_browser_process = None
 
 
 class SyncCDPSession:
@@ -855,7 +963,7 @@ class SyncCDPSession:
         )
 
     def close(self):
-        """Close WebSocket session and close the specific target tab."""
+        """Close WebSocket session, close the specific target tab, and close the browser."""
         if self.ws:
             try:
                 self.ws.close()
@@ -872,3 +980,42 @@ class SyncCDPSession:
             except Exception:
                 pass
             self.target_id = None
+
+        # Close the browser process
+        global _shared_browser_process
+        if _shared_browser_process:
+            try:
+                _shared_browser_process.terminate()
+            except Exception:
+                pass
+            _shared_browser_process = None
+
+    def capture_screenshot(self, url: str) -> bytes:
+        """Navigate to a URL and capture a screenshot, caching the result."""
+        datekey = datetime.date.today().isoformat()
+        screenshots_dir = get_screenshot_dir(datekey)
+        filename = secure_filename(url)
+        filepath = os.path.join(screenshots_dir, filename)
+
+        if os.path.exists(filepath):
+            return Path(filepath).read_bytes()
+
+        self.navigate(url)
+        # Try to click any "Accept" or "Einwilligen" cookie consent buttons
+        self.click_accept_button()
+        result = self.call("Page.captureScreenshot")
+        image_bytes = base64.b64decode(result["data"])
+        
+        # Resize to 1200x675
+        if has_pillow:
+            from io import BytesIO
+            image = Image.open(BytesIO(image_bytes))
+            image = image.resize((1200, 675), Image.Resampling.LANCZOS)
+            width, height = image.size
+            image = image.crop((0, 0, max(0, width - 10), height))
+            output = BytesIO()
+            image.save(output, format="PNG")
+            image_bytes = output.getvalue()
+        
+        Path(filepath).write_bytes(image_bytes)
+        return image_bytes

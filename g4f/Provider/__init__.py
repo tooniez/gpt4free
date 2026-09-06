@@ -8,7 +8,6 @@ from ..providers.create_images import CreateImagesProvider
 
 class ProviderLoader:
     names = [
-        "AnyProvider",
         "AIBadgr",
         "Anthropic",
         "Antigravity",
@@ -34,7 +33,6 @@ class ProviderLoader:
         "EdgeTTS",
         "ElevenLabs",
         "FenayAI",
-        "G4FSpace",
         "GLM",
         "Gemini",
         "GeminiCLI",
@@ -507,6 +505,7 @@ class ProviderLoader:
 
 
 __all__ = [
+    "AnyProvider",
     "BaseProvider",
     "ProviderType",
     "RetryProvider",
@@ -516,6 +515,7 @@ __all__ = [
     "AsyncGeneratorProvider",
     "CreateImagesProvider",
     "ProviderUtils",
+    "G4FSpace",
     "__providers__",
     "__map__",
 ] + ProviderLoader.names

@@ -392,6 +392,25 @@ class Sources(ResponseType):
         )
 
 
+class SearchResults(ResponseType):
+    def __init__(self, sources: List[Dict[str, str]]) -> None:
+        """Initialize with a list of source dictionaries."""
+        self.list = sources
+
+    def __str__(self) -> str:
+        """Return formatted sources as a string."""
+        if not self.list:
+            return ""
+        return (
+            "".join(
+                [
+                    f"> **{format_link(link['link'], link.get('title', link.get('name', None)))}**\n> {link.get('snippet', '')}\n"
+                    for link in self.list
+                ]
+            )
+        )
+
+
 class SourceLink(ResponseType):
     def __init__(self, title: str, url: str) -> None:
         self.title = title

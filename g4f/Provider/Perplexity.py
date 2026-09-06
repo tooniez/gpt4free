@@ -103,16 +103,6 @@ class Perplexity(AsyncGeneratorProvider, ProviderModelMixin):
     }
 
     @classmethod
-    async def get_quota(cls, **kwargs):
-        chunks = []
-        async for chunk in cls.create_async_generator(
-            cls.default_model, [{"role": "user", "content": "say only okay"}]
-        ):
-            if isinstance(chunk, str):
-                return {"content": chunk}
-        raise RuntimeError("No response")
-
-    @classmethod
     async def create_async_generator(
         cls,
         model: str,
@@ -446,6 +436,13 @@ class Perplexity(AsyncGeneratorProvider, ProviderModelMixin):
                             )
                             continue
 
+                        if block.get("intended_usage") == "ask_text":
+                            chunk = "".join(block.get("markdown_block", {}).get("chunks", []))
+                            if chunk and (not full_response or not full_response.endswith(chunk)) and not full_reasoning.startswith(chunk):
+                                if not full_response or not chunk.startswith(full_response):
+                                    full_response += chunk
+                                    yield chunk
+
                         # Handle response text
                         for patch in block.get("diff_block", {}).get("patches", []):
                             if patch.get("path") == "/progress":
@@ -479,11 +476,13 @@ class Perplexity(AsyncGeneratorProvider, ProviderModelMixin):
                             )
 
                             if value and isinstance(value, str):
-                                if value.startswith(full_response):
-                                    value = value[len(full_response) :]
-                                elif full_response.endswith(value):
-                                    value = ""
-                                if value:
+                                if full_response and full_response.startswith(value):
+                                    pass
+                                elif full_response and full_response.endswith(value):
+                                    pass
+                                elif full_response and value.startswith(full_response):
+                                    pass
+                                elif value:
                                     full_response += value
                                     yield value
 
@@ -500,7 +499,7 @@ class Perplexity(AsyncGeneratorProvider, ProviderModelMixin):
                                 "name": f"Perplexity - {conversation.thread_title}",
                                 "url": f"{cls.url}/search/{conversation.thread_url_slug}",
                             }
-                        ]
+                        ] if hasattr(conversation, "thread_title") and hasattr(conversation, "thread_url_slug") else []
                         + sources
                     )
                 yield conversation

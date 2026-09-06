@@ -2,55 +2,87 @@ from __future__ import annotations
 
 import asyncio
 import json
+import urllib.parse
 
-from ...typing import AsyncResult, Messages, Cookies
-from ..base_provider import AsyncGeneratorProvider, ProviderModelMixin, AuthFileMixin
-from ...requests import Browser, get_nodriver, has_nodriver
-from ...errors import MissingRequirementsError, ModelNotFoundError
+from ...typing import AsyncResult, Messages
+from ..base_provider import AsyncGeneratorProvider, ProviderModelMixin
+from ...providers.response import SearchResults
+from ...requests.cdp import CDPSession
 from ... import debug
 from ..helper import get_last_user_message
 
 
-class GoogleSearch(AsyncGeneratorProvider, AuthFileMixin):
+class GoogleSearch(AsyncGeneratorProvider, ProviderModelMixin):
     label = "Google Search"
     url = "https://google.com"
-    working = has_nodriver
-    use_nodriver = True
+    working = True
+    supports_native_tools = True
+    default_model = "search"
 
     @classmethod
     async def create_async_generator(
         cls,
         model: str,
         messages: Messages,
-        browser: Browser = None,
-        proxy: str = None,
-        timeout: int = 300,
         **kwargs,
     ) -> AsyncResult:
-        if not has_nodriver:
-            raise MissingRequirementsError("Google requires a browser to be installed.")
-        if not cls.working:
-            raise ModelNotFoundError(f"Model {model} not found.")
+        query = get_last_user_message(messages)
+        search_url = f"{cls.url}/search?q={urllib.parse.quote_plus(query)}"
+
+        debug.log(f"Google Search: Starting CDPSession for query: {query}")
+        session = CDPSession(headless=False)
+        await session.start()
+
         try:
-            stop_browser = None
-            if browser is None:
-                browser, stop_browser = await get_nodriver(proxy=proxy, timeout=timeout)
-            tab = await browser.get(cls.url)
-            await asyncio.sleep(3)
-            while True:
+            await session.navigate(search_url)
+
+            await session.click_accept_button()
+
+            # Wait for Google search results page to load
+            for _ in range(30):
                 try:
-                    await tab.wait_for('[aria-modal="true"]', timeout=10)
-                    await tab.wait_for(
-                        '[aria-modal="true"][style*="display: none"]', timeout=timeout
+                    has_results = await session.evaluate_js(
+                        "document.querySelectorAll('div.g, h3').length > 0"
                     )
-                except Exception as e:
-                    break
-                break
-            element = await tab.wait_for("textarea")
-            await element.send_keys(get_last_user_message(messages))
-            button = await tab.find("Google Suche")
-            await button.click()
-            await asyncio.sleep(1000)
+                    if has_results:
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+
+            # Extract search results from the DOM
+            results_json = await session.evaluate_js(
+                """
+                (() => {
+                    const results = [];
+                    const items = document.querySelectorAll('h3');
+                    items.forEach(item => {
+                        const linkEl = item.parentElement;
+                        const title = item.innerText || '';
+                        const link = linkEl.href  ? new URL(linkEl.href || '/') : null;
+                        if (link) link.searchParams.delete("srsltid")
+                        let parentEl = linkEl.parentElement.parentElement.parentElement;
+                        let snippetEl = null;
+                        while (parentEl) {
+                            if (parentEl.nextElementSibling)
+                            snippetEl = parentEl.nextElementSibling.querySelector("div div:not(:has(a, svg)) span:not(:has(div, span, a, svg)):not(:empty)");
+                            if (snippetEl) break;
+                            parentEl = parentEl.parentElement;
+                        }
+                        const snippet = snippetEl ? snippetEl.innerText : '';
+                        if (title && link) {
+                            results.push({ title, link: link.toString(), snippet });
+                        }
+                    });
+                    return JSON.stringify(results);
+                })()
+                """
+            )
+
+            results = json.loads(results_json) if results_json else []
+
+            if not results:
+                raise RuntimeError("No search results found.")
+            yield SearchResults(results)
         finally:
-            if stop_browser is not None:
-                await stop_browser()
+            await session.close()

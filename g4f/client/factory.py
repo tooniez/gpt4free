@@ -100,6 +100,7 @@ class AbstractClientFactory:
             if not api_key and not cls.is_provider_api_key(AppConfig.g4f_api_key):
                 api_key = AppConfig.g4f_api_key
             provider = create_custom_provider(base_url, api_key, name=name, **kwargs)
+            provider.backup_url = base_url
         elif provider in ProviderUtils.convert:
             provider = ProviderUtils.convert[provider]
         else:
@@ -136,6 +137,7 @@ class AbstractClientFactory:
                     if cls.is_provider_api_key(api_key)
                     or config.get("backupUrl") is None
                     else config.get("backupUrl", config.get("baseUrl")),
+                    backup_url=config.get("backupUrl"),
                     api_key=api_key,
                     name=provider,
                     default_model=cls._live_providers["defaultModels"].get(

@@ -537,7 +537,7 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
             **RESPONSE_HEADER_LIMITS,
         ) as session:
             await cls.fetch_snlm0e(session, cls._cookies)
-        return cls._snlm0e
+        return {"sid": cls._sid, "bl": cls._bl, "push_id": cls._upload_push_id}
 
     @classmethod
     async def get_models(

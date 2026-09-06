@@ -1311,6 +1311,34 @@ class Api:
                     e, config, HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
+        @self.app.get("/screenshot", responses=responses)
+        async def image_from_url(
+            url: str,
+        ):
+            try:
+                from g4f.requests.cdp import CDPSession
+                session = CDPSession(headless=True)
+                await session.start()
+                try:
+                    image_bytes = await session.capture_screenshot(f"{url}&noads={int(time.time())}" if "?" in url else f"{url}?_={int(time.time())}")
+                    # You might want to save this image or return it directly
+                    # For now, let's return it as a FileResponse
+                    # Create a temporary file to store the image
+                    import tempfile
+                    import os
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                        tmp.write(image_bytes)
+                        tmp_path = tmp.name
+                    
+                    return FileResponse(tmp_path, media_type="image/png", background=BackgroundTask(lambda: os.remove(tmp_path)))
+                finally:
+                    await session.close()
+            except Exception as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(
+                    e, None, HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
         @self.app.get(
             "/v1/providers",
             responses={

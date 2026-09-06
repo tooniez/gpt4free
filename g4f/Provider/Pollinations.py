@@ -40,6 +40,7 @@ class Pollinations(AsyncGeneratorProvider, ProviderModelMixin):
     label = "Pollinations 🌸"
     url = "https://pollinations.ai"
     login_url = "https://enter.pollinations.ai"
+    base_url = "https://gen.pollinations.ai/v1"
     backup_url = "https://g4f.space/api/pollinations"
     active_by_default = True
     working = True
@@ -50,6 +51,7 @@ class Pollinations(AsyncGeneratorProvider, ProviderModelMixin):
     image_models_endpoint = "https://image.pollinations.ai/models"
     gen_image_api_endpoint = "https://gen.pollinations.ai/image/{}"
     gen_text_api_endpoint = "https://gen.pollinations.ai/v1/chat/completions"
+    gen_text_models_endpoint = "https://gen.pollinations.ai/text/models"
     gen_image_models_endpoint = "https://gen.pollinations.ai/image/models"
     quota_url = "https://g4f.space/api/pollinations/quota"
     worker_api_endpoint = "https://g4f.space/api/pollinations/chat/completions"
@@ -103,7 +105,7 @@ class Pollinations(AsyncGeneratorProvider, ProviderModelMixin):
             api_key = AuthManager.load_api_key(cls)
         if (OpenaiTemplate.is_provider_api_key(api_key)):
             debug.log(f"Using Pollinations with provided API key.")
-            models_url = cls.gen_text_api_endpoint
+            models_url = cls.gen_text_models_endpoint
             image_url = cls.gen_image_models_endpoint
         else:
             debug.log(f"Authenticated with Pollinations using G4F API.")
@@ -544,8 +546,10 @@ class Pollinations(AsyncGeneratorProvider, ProviderModelMixin):
                 headers = {"authorization": f"Bearer {api_key}"}
             yield JsonRequest.from_dict(data)
             async with session.post(endpoint, json=data, headers=headers) as response:
-                if response.status in (400, 500):
-                    debug.error(f"Error: {response.status} - Bad Request: {data}")
+                if response.status in (400, 404, 500):
+                    body = json.dumps(data)
+                    stripped_body = f"{body[:200]}...{body[-200:]}" if len(body) > 500 else body[:200] if len(body) > 200 else body
+                    debug.error(f"Error: {response.status} - Bad Request: {stripped_body}")
                 async for chunk in read_response(
                     response,
                     stream,
