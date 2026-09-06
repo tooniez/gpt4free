@@ -68,10 +68,10 @@ class HuggingSpace(AsyncGeneratorProvider, ProviderModelMixin):
         is_started = False
         random.shuffle(cls.providers)
         for provider in cls.providers:
-            if model in getattr(provider, "model_aliases", {}) or model in provider.get_models():
+            if model in (getattr(provider, "model_aliases", {}) or {}) or model in provider.get_models():
                 alias = (
                     provider.model_aliases[model]
-                    if model in provider.model_aliases
+                    if model in (getattr(provider, "model_aliases", {}) or {})
                     else model
                 )
                 async for chunk in provider.create_async_generator(

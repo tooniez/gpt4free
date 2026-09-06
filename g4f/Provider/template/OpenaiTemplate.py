@@ -34,6 +34,7 @@ class OpenaiTemplate(AsyncGeneratorProvider, ProviderModelMixin, RaiseErrorMixin
     supports_native_tools: bool = True
     _checked_api_keys: dict = {}
     add_thought_signature = None
+    supports_reasoning_effort_none = True
 
     @classmethod
     async def get_quota(cls, api_key: Optional[str] = None, **kwargs) -> dict:
@@ -65,7 +66,7 @@ class OpenaiTemplate(AsyncGeneratorProvider, ProviderModelMixin, RaiseErrorMixin
             **({"model": cls.default_model} if cls.default_model else {}),
             "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 1,
-            "reasoning_effort": "none",
+            "reasoning_effort": ("none" if cls.supports_reasoning_effort_none else "low"),
         }
         async with StreamSession() as session:
             async with session.post(url, headers=headers, json=json_data) as response:

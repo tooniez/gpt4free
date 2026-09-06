@@ -24,6 +24,7 @@ class Ollama(OpenaiTemplate):
     active_by_default = True
     local_models: list[str] = []
     model_aliases = {"gpt-oss-120b": "gpt-oss:120b", "gpt-oss-20b": "gpt-oss:20b"}
+    supports_reasoning_effort_none = False
 
     @classmethod
     async def get_quota(cls, api_key: Optional[str] = None) -> Optional[dict]:

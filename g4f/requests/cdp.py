@@ -58,7 +58,6 @@ import subprocess
 import time
 import urllib.request
 from typing import Optional, Dict, Any, List
-import re
 import hashlib
 from urllib.parse import urlparse
 import datetime
@@ -69,6 +68,8 @@ except ImportError:
     pass
 
 from ..cookies import BrowserConfig
+from ..files import secure_filename
+from .. import debug
 
 try:
     from PIL import Image
@@ -79,16 +80,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 from pathlib import Path
-
-def secure_filename(url: str) -> str:
-    """Create a secure filename from a URL."""
-    parsed = urlparse(url)
-    path = parsed.path
-    if path:
-        filename = os.path.basename(path)
-        if filename:
-            return filename
-    return hashlib.sha256(url.encode()).hexdigest() + ".png"
 
 def get_screenshot_dir(datekey: str = None) -> str:
     """Get the screenshot directory, creating it if necessary."""
@@ -459,7 +450,7 @@ class CDPSession:
 
                         if method in self._event_queues:
                             for q in self._event_queues[method]:
-                                q.put_nowait(params)
+                                q.put_nowait({"_method": method, **params})
         except Exception as e:
             if not self._closing:
                 logger.error(f"CDP receiver loop error: {e}")
@@ -568,6 +559,53 @@ class CDPSession:
             logger.warning(
                 f"Timeout waiting for Page.loadEventFired when navigating to {url}"
             )
+
+    async def wait_for_network_idle(
+        self, idle_time: float = 0.5, timeout: float = 15.0
+    ) -> bool:
+        """Wait until network activity settles (no requests for *idle_time* seconds).
+
+        Uses Network.requestWillBeSent / Network.loadingFinished events to track
+        in-flight requests. Returns True if the network went idle, False on timeout.
+        """
+        queue: asyncio.Queue = asyncio.Queue()
+        self.add_event_handler("Network.requestWillBeSent", queue)
+        self.add_event_handler("Network.loadingFinished", queue)
+        self.add_event_handler("Network.loadingFailed", queue)
+
+        # Count currently in-flight requests via JS-free CDP approach:
+        # Every requestWillBeSent increments, every loadingFinished/loadingFailed decrements.
+        pending = 0
+        deadline = time.monotonic() + timeout
+        last_activity = time.monotonic()
+
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+
+                idle_remaining = idle_time - (time.monotonic() - last_activity)
+                wait_for = min(remaining, max(0.05, idle_remaining))
+
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=wait_for)
+                    method = event.get("_method", "")
+                    if method == "Network.requestWillBeSent":
+                        pending += 1
+                        last_activity = time.monotonic()
+                    elif method in ("Network.loadingFinished", "Network.loadingFailed"):
+                        pending = max(0, pending - 1)
+                        last_activity = time.monotonic()
+                except asyncio.TimeoutError:
+                    pass
+
+                if pending == 0 and (time.monotonic() - last_activity) >= idle_time:
+                    return True
+        finally:
+            self.remove_event_handler("Network.requestWillBeSent", queue)
+            self.remove_event_handler("Network.loadingFinished", queue)
+            self.remove_event_handler("Network.loadingFailed", queue)
 
     async def mouse_move(self, x: int, y: int):
         """Simulate a mouse movement to the given coordinates."""
@@ -708,13 +746,20 @@ class CDPSession:
         """Navigate to a URL and capture a screenshot, caching the result."""
         datekey = datetime.date.today().isoformat()
         screenshot_dir = get_screenshot_dir(datekey)
-        filename = secure_filename(url)
+        filename = f"{secure_filename(url.replace('https://', '').replace('http://', ''))}.png"
         filepath = os.path.join(screenshot_dir, filename)
+        debug.log(f"Screenshot path: {filepath}")
 
         if os.path.exists(filepath):
             return Path(filepath).read_bytes()
 
+        debug.log(f"Capturing screenshot for {url} ...")
         await self.navigate(url)
+        # Wait for network activity to settle before capturing
+        await self.wait_for_network_idle(idle_time=5, timeout=15.0)
+        if await self.evaluate_js('!document.doctype'):
+            raise RuntimeError(f"Failed to load page {url} for screenshot, doctype={await self.evaluate_js('String(document.doctype)')}")
+        await asyncio.sleep(3)
         # Try to click any "Accept" or "Einwilligen" cookie consent buttons
         await self.click_accept_button()
         await asyncio.sleep(0.5)
@@ -725,9 +770,9 @@ class CDPSession:
         if has_pillow:
             from io import BytesIO
             image = Image.open(BytesIO(image_bytes))
-            image = image.resize((1200, 675), Image.Resampling.LANCZOS)
+            image = image.resize((1200, 630), Image.Resampling.LANCZOS)
             width, height = image.size
-            image = image.crop((0, 0, max(0, width - 16), height))
+            image = image.crop((0, 0, max(0, width - 14), height))
             output = BytesIO()
             image.save(output, format="PNG")
             image_bytes = output.getvalue()
@@ -937,6 +982,50 @@ class SyncCDPSession:
         self.call("Page.navigate", url=url)
         time.sleep(2.0)
 
+    def wait_for_network_idle(self, idle_time: float = 0.5, timeout: float = 15.0) -> bool:
+        """Wait until network activity settles (no in-flight requests for *idle_time* seconds).
+
+        Polls document.readyState and the Performance Resource Timing API to detect
+        when resource loading has stabilised. Returns True when idle, False on timeout.
+        """
+        deadline = time.monotonic() + timeout
+        last_count = -1
+        stable_since = time.monotonic()
+
+        while time.monotonic() < deadline:
+            try:
+                ready = self.evaluate_js("document.readyState")
+                if ready == "complete":
+                    # Count resources that are still loading (responseStart > 0 but no responseEnd)
+                    count = self.evaluate_js(
+                        """(() => {
+                            const entries = performance.getEntriesByType('resource');
+                            let pending = 0;
+                            for (const e of entries) {
+                                if (e.responseStart > 0 && e.responseEnd === 0) {
+                                    pending++;
+                                }
+                            }
+                            return pending;
+                        })()"""
+                    )
+                    count = count or 0
+                    if count == last_count:
+                        if (time.monotonic() - stable_since) >= idle_time:
+                            return True
+                    else:
+                        last_count = count
+                        stable_since = time.monotonic()
+                else:
+                    # Page not fully loaded yet — reset stability timer
+                    last_count = -1
+                    stable_since = time.monotonic()
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        return False
+
     def click(self, x: int = 200, y: int = 400):
         """
         Simulate a real mouse click at (x, y) on the page.
@@ -1001,8 +1090,11 @@ class SyncCDPSession:
             return Path(filepath).read_bytes()
 
         self.navigate(url)
+        # Wait for network activity to settle before capturing
+        self.wait_for_network_idle()
         # Try to click any "Accept" or "Einwilligen" cookie consent buttons
         self.click_accept_button()
+        time.sleep(0.5)
         result = self.call("Page.captureScreenshot")
         image_bytes = base64.b64decode(result["data"])
         

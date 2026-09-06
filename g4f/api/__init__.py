@@ -1320,7 +1320,7 @@ class Api:
                 session = CDPSession(headless=True)
                 await session.start()
                 try:
-                    image_bytes = await session.capture_screenshot(f"{url}&noads={int(time.time())}" if "?" in url else f"{url}?_={int(time.time())}")
+                    image_bytes = await session.capture_screenshot(f"{url}&noads={int(time.time())}" if "?" in url else f"{url}?noads={int(time.time())}")
                     # You might want to save this image or return it directly
                     # For now, let's return it as a FileResponse
                     # Create a temporary file to store the image

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import inspect
 import requests
 from datetime import datetime
 from urllib.parse import quote, unquote
@@ -142,6 +144,8 @@ class Website:
             "/apps/": {"function": self._apps, "methods": ["GET"]},
             "/apps/<path:filename>": {"function": self._apps, "methods": ["GET"]},
             "/stats/": {"function": self._stats, "methods": ["GET"]},
+            "/providers/": {"function": self._providers, "methods": ["GET"]},
+            "/providers/<name>": {"function": self._provider_detail, "methods": ["GET"]},
         }
 
         @app.route("/lib.js", methods=["GET"])
@@ -165,6 +169,235 @@ class Website:
 
     def _stats(self):
         return render("stats")
+
+    def _get_providers(self):
+        """Load all providers and return a list of dicts with their attributes."""
+        from g4f.Provider import ProviderLoader
+
+        providers = []
+        for name in ProviderLoader.names:
+            try:
+                provider = ProviderLoader.from_name(name)
+                url = getattr(provider, "url", None)
+                models = getattr(provider, "models", []) or getattr(provider, "get_models", [])
+                needs_auth = getattr(provider, "needs_auth", False)
+                working = getattr(provider, "working", False)
+                supports_stream = getattr(provider, "supports_stream", False)
+                supports_message_history = getattr(provider, "supports_message_history", False)
+                supports_system_message = getattr(provider, "supports_system_message", False)
+                params = getattr(provider, "params", [])
+                if callable(params):
+                    try:
+                        params = params()
+                    except Exception:
+                        params = []
+                providers.append({
+                    "name": name,
+                    "url": url,
+                    "models": models if isinstance(models, list) else list(models) if models else [],
+                    "needs_auth": needs_auth,
+                    "working": working,
+                    "supports_stream": supports_stream,
+                    "supports_message_history": supports_message_history,
+                    "supports_system_message": supports_system_message,
+                    "params": params if isinstance(params, list) else list(params) if params else [],
+                })
+            except Exception:
+                pass
+        return providers
+
+    def _providers(self):
+        providers = self._get_providers()
+
+        # Build HTML cards
+        cards_html = """
+        <div class="page-header">
+            <h1>Available Providers</h1>
+            <p>Browse the list of AI providers supported by G4F</p>
+        </div>
+
+        <div class="providers-list">
+        """
+        for p in providers:
+            models_html = ""
+            if p["models"]:
+                models_list = ", ".join(p["models"][:5]) if isinstance(p["models"], list) else ""
+                if len(p["models"]) > 5:
+                    models_list += f" (+{len(p['models']) - 5} more)"
+                models_html = f"<div class='provider-details'><strong>Models:</strong> {models_list}</div>"
+            else:
+                models_html = "<div class='provider-details'><em>No specific models</em></div>"
+
+            url_html = f"<div class='provider-url'>{p['url']}</div>" if p["url"] else ""
+            auth_html = "<div class='provider-details'><strong>Auth:</strong> Required</div>" if p["needs_auth"] else ""
+            working_html = "<div class='provider-details'><strong>Status:</strong> Working</div>" if p["working"] else ""
+
+            cards_html += f"""
+            <div class="provider-card" onclick="window.location.href='/providers/{p['name']}'">
+                <div class="provider-name">{p['name']}</div>
+                {url_html}
+                {models_html}
+                {auth_html}
+                {working_html}
+                <div class="provider-actions">
+                    <a href="/providers/{p['name']}" class="btn btn-primary">Details</a>
+                    <a href="{p['url']}" target="_blank" class="btn btn-secondary">Website</a>
+                </div>
+            </div>
+            """
+        cards_html += "\n        </div>"
+
+        # Read the template
+        template_path = os.path.join(os.path.dirname(__file__), "providers.html")
+        if os.path.exists(template_path):
+            with open(template_path, "r", encoding="utf-8") as f:
+                html = f.read()
+            # Replace content between markers
+            import re
+            html = re.sub(
+                r"<!-- CONTENT_START -->.*?<!-- CONTENT_END -->",
+                f"<!-- CONTENT_START -->{cards_html}<!-- CONTENT_END -->",
+                html,
+                flags=re.DOTALL,
+            )
+            return html
+        else:
+            return "Providers template not found"
+
+    def _provider_detail(self, name: str = ""):
+        from html import escape
+
+        providers = self._get_providers()
+        names = [p["name"] for p in providers]
+
+        # Find the current provider (case-insensitive)
+        idx = None
+        for i, n in enumerate(names):
+            if n.lower() == name.lower():
+                idx = i
+                break
+
+        if idx is None:
+            return self._providers()
+
+        p = providers[idx]
+        prev_p = providers[idx - 1] if idx > 0 else providers[-1]
+        next_p = providers[idx + 1] if idx < len(providers) - 1 else providers[0]
+
+        # Build models list HTML
+        if p["models"]:
+            if callable(p["models"]):
+                try:
+                    p["models"] = p["models"]()
+                except Exception:
+                    p["models"] = []
+                if inspect.isawaitable(p["models"]):
+                    p["models"] = asyncio.run(p["models"])
+            models_html = "<ul class='model-list'>" + "".join(
+                f"<li>{escape(str(m))}</li>" for m in p["models"]
+            ) + "</ul>"
+        else:
+            models_html = "<p><em>No specific models listed</em></p>"
+
+        # Build params list HTML
+        if p["params"]:
+            params_html = "<ul class='param-list'>" + "".join(
+                f"<li>{escape(str(param))}</li>" for param in p["params"]
+            ) + "</ul>"
+        else:
+            params_html = "<p><em>None</em></p>"
+
+        # Build attributes table
+        attrs_html = f"""
+        <table class="attr-table">
+            <tr><th>URL</th><td><a href="{escape(p['url'] or '')}" target="_blank">{escape(p['url'] or 'N/A')}</a></td></tr>
+            <tr><th>Working</th><td>{'✅ Yes' if p['working'] else '❌ No'}</td></tr>
+            <tr><th>Needs Auth</th><td>{'🔒 Yes' if p['needs_auth'] else '🔓 No'}</td></tr>
+            <tr><th>Supports Stream</th><td>{'✅ Yes' if p['supports_stream'] else '❌ No'}</td></tr>
+            <tr><th>Supports Message History</th><td>{'✅ Yes' if p['supports_message_history'] else '❌ No'}</td></tr>
+            <tr><th>Supports System Message</th><td>{'✅ Yes' if p['supports_system_message'] else '❌ No'}</td></tr>
+        </table>
+        """
+
+        # Screenshot / logo section
+        logo_url = f"/screenshot?url={p.get('url', (p.get('base_url', p.get('baseUrl', ''))).replace('https://', '').replace('http://', '').replace('playground.ai.', '').replace('api.', '').replace('router.', '').split('/')[0])}"
+        screenshot_html = f"""
+        <div class="screenshot-section">
+            <img src="{logo_url}" alt="{escape(p['name'])} logo" class="provider-logo"
+                 onerror="this.onerror=null;this.src='https://image.thum.io/get/width/600/{escape(p['url'] or '')}'"
+                 style="max-width:100%;border-radius:8px;border:1px solid var(--card-border)" />
+            <p class="screenshot-caption">Logo from g4f.space / screenshot from {escape(p['url'] or 'N/A')}</p>
+        </div>
+        """
+
+        detail_html = f"""
+        <div class="detail-header">
+            <h1>{escape(p['name'])}</h1>
+            <p class="detail-subtitle">Provider #{idx + 1} of {len(providers)}</p>
+        </div>
+
+        <div class="nav-prev-next">
+            <a href="/providers/{escape(prev_p['name'])}" class="nav-btn nav-prev">
+                ← {escape(prev_p['name'])}
+            </a>
+            <a href="/providers/" class="nav-btn nav-back">All Providers</a>
+            <a href="/providers/{escape(next_p['name'])}" class="nav-btn nav-next">
+                {escape(next_p['name'])} →
+            </a>
+        </div>
+
+        <div class="detail-grid">
+            <div class="detail-card">
+                <h2>Attributes</h2>
+                {attrs_html}
+            </div>
+            <div class="detail-card">
+                <h2>Logo / Screenshot</h2>
+                {screenshot_html}
+            </div>
+        </div>
+
+        <div class="detail-card detail-models">
+            <h2>Models ({len(p['models'])})</h2>
+            {models_html}
+        </div>
+
+        <div class="detail-card">
+            <h2>Parameters</h2>
+            {params_html}
+        </div>
+
+        <div class="nav-prev-next" style="margin-top:2rem">
+            <a href="/providers/{escape(prev_p['name'])}" class="nav-btn nav-prev">
+                ← {escape(prev_p['name'])}
+            </a>
+            <a href="/providers/" class="nav-btn nav-back">All Providers</a>
+            <a href="/providers/{escape(next_p['name'])}" class="nav-btn nav-next">
+                {escape(next_p['name'])} →
+            </a>
+        </div>
+        """
+
+        # Read the template and inject detail content
+        template_path = os.path.join(os.path.dirname(__file__), "providers.html")
+        if os.path.exists(template_path):
+            with open(template_path, "r", encoding="utf-8") as f:
+                html = f.read()
+            # Replace content between markers
+            import re
+            html = re.sub(
+                r"<!-- CONTENT_START -->.*?<!-- CONTENT_END -->",
+                f"<!-- CONTENT_START -->{detail_html}<!-- CONTENT_END -->",
+                html,
+                flags=re.DOTALL,
+            )
+            html = html.replace(
+                "<title>Providers</title>",
+                f"<title>{escape(p['name'])} – Provider Details</title>"
+            )
+            return html
+        else:
+            return "Providers template not found"
 
     def _chat(self, filename=""):
         filename = f"chat/{filename}" if filename else "chat/index"
