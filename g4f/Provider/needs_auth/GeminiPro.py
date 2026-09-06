@@ -14,3 +14,9 @@ class GeminiPro(OpenaiTemplate):
     working = True
     models_needs_auth = True
     add_thought_signature = True
+    model_aliases = {
+        "gemini-2.5-pro": "models/gemini-2.5-pro",
+        "gemini-2.5-flash": "models/gemini-2.5-flash",
+        "gemini-2.0-flash": "models/gemini-2.0-flash",
+        "gemini-2.0-flash-thinking": "models/gemini-2.0-flash-thinking",
+    }
