@@ -676,7 +676,7 @@ class CDPSession:
             const buttons = document.querySelectorAll('button, input[type="submit"]');
             for (let button of buttons) {
                 const text = button.textContent.trim();
-                if (text === 'Accept' || text === 'Einwilligen' || text === 'Alle akzeptieren') {
+                if (text === 'Accept' || text == 'Accept all' || text === 'Einwilligen' || text === 'Alle akzeptieren') {
                     const rect = button.getBoundingClientRect();
                     return {
                         x: rect.left + window.scrollX,
