@@ -30,6 +30,7 @@ from fastapi.security import APIKeyHeader
 from starlette.exceptions import HTTPException
 from starlette.status import (
     HTTP_200_OK,
+    HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_401_UNAUTHORIZED,
     HTTP_403_FORBIDDEN,
@@ -1310,29 +1311,28 @@ class Api:
                 return ErrorResponse.from_exception(
                     e, config, HTTP_500_INTERNAL_SERVER_ERROR
                 )
+    
+        lock = asyncio.Lock()
 
         @self.app.get("/screenshot", responses=responses)
         async def image_from_url(
             url: str,
         ):
             try:
-                from g4f.requests.cdp import CDPSession
-                session = CDPSession(headless=True)
-                await session.start()
-                try:
-                    image_bytes = await session.capture_screenshot(f"{url}&noads={int(time.time())}" if "?" in url else f"{url}?noads={int(time.time())}")
-                    # You might want to save this image or return it directly
-                    # For now, let's return it as a FileResponse
-                    # Create a temporary file to store the image
-                    import tempfile
-                    import os
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                        tmp.write(image_bytes)
-                        tmp_path = tmp.name
-                    
-                    return FileResponse(tmp_path, media_type="image/png", background=BackgroundTask(lambda: os.remove(tmp_path)))
-                finally:
-                    await session.close()
+                async with lock:
+                    from g4f.requests.cdp import CDPSession
+                    session = CDPSession(headless=True)
+                    await session.start()
+                    try:
+                        screenshot_path = await session.capture_screenshot(url)
+                        print(f"Screenshot saved to: {screenshot_path}")
+                        return FileResponse(
+                            screenshot_path,
+                            media_type="image/jpeg",
+                            #headers={"Cache-Control": "max-age=8600"},
+                        )
+                    finally:
+                        await session.close()
             except Exception as e:
                 logger.exception(e)
                 return ErrorResponse.from_exception(
@@ -1487,14 +1487,18 @@ class Api:
             the ``sandbox`` directive; they are leaf resources and do not run
             in their own browsing context.
             """
-            from g4f.mcp.pa_provider import get_workspace_dir
+            from g4f.mcp.pa_provider import resolve_workspace_path
 
-            workspace = get_workspace_dir()
+            # Extract user_id and workspace_secret from headers if available
+            user_id = request.headers.get("x-user-id", "")
+            workspace_secret = request.headers.get("x-workspace-secret", "")
 
             # Normalise and check for traversal
             try:
-                resolved = (workspace / file_path).resolve()
-                resolved.relative_to(workspace.resolve())
+                resolved, workspace = resolve_workspace_path(
+                    file_path, user_id=user_id, workspace_secret=workspace_secret, for_write=False
+                )
+                resolved.relative_to(workspace)
             except (ValueError, Exception):
                 return ErrorResponse.from_message(
                     "Path traversal is not allowed", HTTP_403_FORBIDDEN
@@ -1576,6 +1580,272 @@ class Api:
                 media_type=mime_type,
                 headers=headers,
             )
+
+        # ------------------------------------------------------------------ #
+        # Secret conversation endpoints (per-user, stored in secret workspace) #
+        # ------------------------------------------------------------------ #
+
+        @self.app.get(
+            "/v1/secret/conversations",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            },
+        )
+        async def list_secret_conversations_endpoint(request: Request):
+            """List all secret conversations for the authenticated user."""
+            from g4f.mcp.pa_provider import list_secret_conversations
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            return {"conversations": list_secret_conversations(user_id)}
+
+        @self.app.post(
+            "/v1/secret/conversations",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            },
+        )
+        async def save_secret_conversation_endpoint(request: Request):
+            """Save a conversation to the user's secret workspace."""
+            from g4f.mcp.pa_provider import save_secret_conversation
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            workspace_secret = request.headers.get("x-workspace-secret", "")
+            try:
+                body = await request.json()
+            except Exception:
+                return ErrorResponse.from_message("Invalid JSON body")
+            result = save_secret_conversation(user_id, body, workspace_secret or None)
+            return result
+
+        @self.app.post(
+            "/v1/secret/conversations/sync",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            },
+        )
+        async def sync_secret_conversations_endpoint(request: Request):
+            """Sync (upload) multiple conversations to the user's secret workspace."""
+            from g4f.mcp.pa_provider import save_secret_conversation
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            workspace_secret = request.headers.get("x-workspace-secret", "")
+            try:
+                body = await request.json()
+            except Exception:
+                return ErrorResponse.from_message("Invalid JSON body")
+            conversations = body.get("conversations", []) if isinstance(body, dict) else body
+            saved = 0
+            errors = []
+            for conv in conversations:
+                res = save_secret_conversation(user_id, conv, workspace_secret or None)
+                if res.get("saved"):
+                    saved += 1
+                else:
+                    errors.append(res.get("error", "Unknown error"))
+            return {"saved": saved, "errors": errors}
+
+        @self.app.get(
+            "/v1/secret/conversations/{conversation_id}",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+                HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            },
+        )
+        async def get_secret_conversation_endpoint(
+            conversation_id: str, request: Request
+        ):
+            """Retrieve a single secret conversation by ID."""
+            from g4f.mcp.pa_provider import get_secret_conversation
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            workspace_secret = request.headers.get("x-workspace-secret", "")
+            conv = get_secret_conversation(user_id, conversation_id, workspace_secret or None)
+            if conv is None:
+                return ErrorResponse.from_message(
+                    f"Conversation '{conversation_id}' not found",
+                    HTTP_404_NOT_FOUND,
+                )
+            return conv
+
+        @self.app.delete(
+            "/v1/secret/conversations/{conversation_id}",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+                HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            },
+        )
+        async def delete_secret_conversation_endpoint(
+            conversation_id: str, request: Request
+        ):
+            """Delete a secret conversation by ID."""
+            from g4f.mcp.pa_provider import delete_secret_conversation
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            deleted = delete_secret_conversation(user_id, conversation_id)
+            if not deleted:
+                return ErrorResponse.from_message(
+                    f"Conversation '{conversation_id}' not found",
+                    HTTP_404_NOT_FOUND,
+                )
+            return {"deleted": True, "id": conversation_id}
+
+        # ── Cross-device workspace secret sharing ───────────────────────────
+
+        @self.app.post(
+            "/v1/secret/request",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            },
+        )
+        async def create_secret_request_endpoint(request: Request):
+            """Create a pending secret-sharing request from a new device."""
+            from g4f.mcp.pa_provider import create_secret_request
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            body = {}
+            try:
+                body = await request.json()
+            except Exception:
+                pass
+            device_name = body.get("device_name", "") if isinstance(body, dict) else ""
+            return create_secret_request(user_id, device_name)
+
+        @self.app.get(
+            "/v1/secret/requests",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            },
+        )
+        async def list_secret_requests_endpoint(request: Request):
+            """List pending secret-sharing requests for the online device."""
+            from g4f.mcp.pa_provider import list_secret_requests
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            return {"requests": list_secret_requests(user_id)}
+
+        @self.app.post(
+            "/v1/secret/request/confirm",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+                HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            },
+        )
+        async def confirm_secret_request_endpoint(request: Request):
+            """Confirm a secret request by sending the workspace secret."""
+            from g4f.mcp.pa_provider import confirm_secret_request
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            try:
+                body = await request.json()
+            except Exception:
+                return ErrorResponse.from_message("Invalid JSON body", HTTP_400_BAD_REQUEST)
+            request_id = body.get("request_id", "")
+            workspace_secret = body.get("workspace_secret", "")
+            if not request_id or not workspace_secret:
+                return ErrorResponse.from_message(
+                    "request_id and workspace_secret are required",
+                    HTTP_400_BAD_REQUEST,
+                )
+            result = confirm_secret_request(user_id, request_id, workspace_secret)
+            if "error" in result:
+                return ErrorResponse.from_message(result["error"], HTTP_404_NOT_FOUND)
+            return result
+
+        @self.app.get(
+            "/v1/secret/request/{request_id}",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            },
+        )
+        async def poll_secret_request_endpoint(
+            request_id: str, request: Request
+        ):
+            """Poll a secret request to check if it has been confirmed."""
+            from g4f.mcp.pa_provider import poll_secret_request
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            return poll_secret_request(user_id, request_id)
+
+        @self.app.delete(
+            "/v1/secret/request/{request_id}",
+            responses={
+                HTTP_200_OK: {},
+                HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+                HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            },
+        )
+        async def delete_secret_request_endpoint(
+            request_id: str, request: Request
+        ):
+            """Cancel / delete a secret-sharing request."""
+            from g4f.mcp.pa_provider import delete_secret_request
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return ErrorResponse.from_message(
+                    "User ID is required (provide x-user-id header)",
+                    HTTP_401_UNAUTHORIZED,
+                )
+            deleted = delete_secret_request(user_id, request_id)
+            if not deleted:
+                return ErrorResponse.from_message(
+                    "Request not found", HTTP_404_NOT_FOUND
+                )
+            return {"deleted": True, "request_id": request_id}
 
         responses = {
             HTTP_200_OK: {"model": TranscriptionResponseModel},

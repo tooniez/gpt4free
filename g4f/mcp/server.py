@@ -56,6 +56,8 @@ class MCPRequest:
     method: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     origin: Optional[str] = None
+    user_id: Optional[str] = None
+    workspace_secret: Optional[str] = None
 
 
 @dataclass
@@ -152,6 +154,12 @@ class MCPServer:
                 tool_name = params.get("name")
                 tool_arguments = params.get("arguments", {})
                 tool_arguments.setdefault("origin", request.origin)
+                # Pass through user identity and workspace secret so file tools
+                # can resolve per-user workspace paths.
+                if request.user_id:
+                    tool_arguments.setdefault("user_id", request.user_id)
+                if request.workspace_secret:
+                    tool_arguments.setdefault("workspace_secret", request.workspace_secret)
 
                 if tool_name not in self.tools:
                     return MCPResponse(
@@ -266,6 +274,8 @@ class MCPServer:
                     method=request_data.get("method"),
                     params=request_data.get("params"),
                     origin=origin,
+                    user_id=request.headers.get("x-user-id"),
+                    workspace_secret=request.headers.get("x-workspace-secret"),
                 )
 
                 # Handle request
@@ -461,14 +471,20 @@ class MCPServer:
             allowed — ``.py``, ``.env``, and other sensitive types return 403.
             HTML files are served with a ``Content-Security-Policy: sandbox``
             header so they run in an isolated null origin.
-            """
-            from .pa_provider import get_workspace_dir
 
-            workspace = get_workspace_dir().resolve()
+            When ``x-user-id`` and ``x-workspace-secret`` headers are present,
+            files are resolved from the user's secret workspace first, falling
+            back to the root workspace.
+            """
+            from .pa_provider import resolve_workspace_path
 
             file_path = request.match_info.get("file_path", "")
+            user_id = request.headers.get("x-user-id", "")
+            workspace_secret = request.headers.get("x-workspace-secret", "")
             try:
-                resolved = (workspace / file_path).resolve()
+                resolved, workspace = resolve_workspace_path(
+                    file_path, user_id=user_id, workspace_secret=workspace_secret, for_write=False
+                )
                 # Security: ensure the resolved path is still inside the workspace directory
                 resolved.relative_to(workspace)
             except (ValueError, Exception):
@@ -501,6 +517,203 @@ class MCPServer:
                 body=content, content_type=mime.split(";")[0].strip(), headers=headers
             )
 
+        async def handle_secret_conversations_list(request: web.Request) -> web.Response:
+            """List all secret conversations for the authenticated user."""
+            from .pa_provider import list_secret_conversations
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            return web.json_response(
+                {"conversations": list_secret_conversations(user_id)},
+                headers={"access-control-allow-origin": "*"},
+            )
+
+        async def handle_secret_conversations_save(request: web.Request) -> web.Response:
+            """Save a conversation to the user's secret workspace."""
+            from .pa_provider import save_secret_conversation
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            workspace_secret = request.headers.get("x-workspace-secret", "")
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "Invalid JSON body"}, status=400)
+            result = save_secret_conversation(user_id, body, workspace_secret or None)
+            return web.json_response(
+                result, headers={"access-control-allow-origin": "*"}
+            )
+
+        async def handle_secret_conversations_sync(request: web.Request) -> web.Response:
+            """Sync (upload) multiple conversations to the user's secret workspace."""
+            from .pa_provider import save_secret_conversation
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            workspace_secret = request.headers.get("x-workspace-secret", "")
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "Invalid JSON body"}, status=400)
+            conversations = body.get("conversations", []) if isinstance(body, dict) else body
+            saved = 0
+            errors = []
+            for conv in conversations:
+                res = save_secret_conversation(user_id, conv, workspace_secret or None)
+                if res.get("saved"):
+                    saved += 1
+                else:
+                    errors.append(res.get("error", "Unknown error"))
+            return web.json_response(
+                {"saved": saved, "errors": errors},
+                headers={"access-control-allow-origin": "*"},
+            )
+
+        async def handle_secret_conversation_get(request: web.Request) -> web.Response:
+            """Retrieve a single secret conversation by ID."""
+            from .pa_provider import get_secret_conversation
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            workspace_secret = request.headers.get("x-workspace-secret", "")
+            conv_id = request.match_info.get("conversation_id", "")
+            conv = get_secret_conversation(user_id, conv_id, workspace_secret or None)
+            if conv is None:
+                return web.json_response(
+                    {"error": f"Conversation '{conv_id}' not found"}, status=404
+                )
+            return web.json_response(conv, headers={"access-control-allow-origin": "*"})
+
+        async def handle_secret_conversation_delete(request: web.Request) -> web.Response:
+            """Delete a secret conversation by ID."""
+            from .pa_provider import delete_secret_conversation
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            conv_id = request.match_info.get("conversation_id", "")
+            deleted = delete_secret_conversation(user_id, conv_id)
+            if not deleted:
+                return web.json_response(
+                    {"error": f"Conversation '{conv_id}' not found"}, status=404
+                )
+            return web.json_response(
+                {"deleted": True, "id": conv_id},
+                headers={"access-control-allow-origin": "*"},
+            )
+
+        # ── Cross-device workspace secret sharing ───────────────────────────
+
+        async def handle_secret_request_create(request: web.Request) -> web.Response:
+            """Create a pending secret-sharing request from a new device."""
+            from .pa_provider import create_secret_request
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            device_name = ""
+            try:
+                body = await request.json()
+                device_name = body.get("device_name", "") if isinstance(body, dict) else ""
+            except Exception:
+                pass
+            result = create_secret_request(user_id, device_name)
+            return web.json_response(
+                result, headers={"access-control-allow-origin": "*"}
+            )
+
+        async def handle_secret_request_list(request: web.Request) -> web.Response:
+            """List pending secret-sharing requests (for the online device to confirm)."""
+            from .pa_provider import list_secret_requests
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            requests_list = list_secret_requests(user_id)
+            return web.json_response(
+                {"requests": requests_list},
+                headers={"access-control-allow-origin": "*"},
+            )
+
+        async def handle_secret_request_confirm(request: web.Request) -> web.Response:
+            """Confirm a secret request by sending the workspace secret to the new device."""
+            from .pa_provider import confirm_secret_request
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "Invalid JSON body"}, status=400)
+            request_id = body.get("request_id", "")
+            workspace_secret = body.get("workspace_secret", "")
+            if not request_id or not workspace_secret:
+                return web.json_response(
+                    {"error": "request_id and workspace_secret are required"}, status=400
+                )
+            result = confirm_secret_request(user_id, request_id, workspace_secret)
+            if "error" in result:
+                return web.json_response(result, status=404)
+            return web.json_response(
+                result, headers={"access-control-allow-origin": "*"}
+            )
+
+        async def handle_secret_request_poll(request: web.Request) -> web.Response:
+            """Poll a secret request to check if it has been confirmed."""
+            from .pa_provider import poll_secret_request
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            request_id = request.match_info.get("request_id", "")
+            result = poll_secret_request(user_id, request_id)
+            return web.json_response(
+                result, headers={"access-control-allow-origin": "*"}
+            )
+
+        async def handle_secret_request_delete(request: web.Request) -> web.Response:
+            """Cancel / delete a secret-sharing request."""
+            from .pa_provider import delete_secret_request
+
+            user_id = request.headers.get("x-user-id", "")
+            if not user_id:
+                return web.json_response(
+                    {"error": "User ID is required"}, status=401
+                )
+            request_id = request.match_info.get("request_id", "")
+            deleted = delete_secret_request(user_id, request_id)
+            if not deleted:
+                return web.json_response(
+                    {"error": "Request not found"}, status=404
+                )
+            return web.json_response(
+                {"deleted": True, "request_id": request_id},
+                headers={"access-control-allow-origin": "*"},
+            )
+
         # Create aiohttp application
         app = web.Application()
         app.router.add_options(
@@ -519,6 +732,16 @@ class MCPServer:
         app.router.add_get("/backend-api/v2/synthesize/{provider}", handle_synthesize)
         app.router.add_get("/pa/providers", handle_pa_providers)
         app.router.add_get("/pa/files/{file_path:.*}", handle_pa_file)
+        app.router.add_get("/v1/secret/conversations", handle_secret_conversations_list)
+        app.router.add_post("/v1/secret/conversations", handle_secret_conversations_save)
+        app.router.add_post("/v1/secret/conversations/sync", handle_secret_conversations_sync)
+        app.router.add_get("/v1/secret/conversations/{conversation_id}", handle_secret_conversation_get)
+        app.router.add_delete("/v1/secret/conversations/{conversation_id}", handle_secret_conversation_delete)
+        app.router.add_post("/v1/secret/request", handle_secret_request_create)
+        app.router.add_get("/v1/secret/requests", handle_secret_request_list)
+        app.router.add_post("/v1/secret/request/confirm", handle_secret_request_confirm)
+        app.router.add_get("/v1/secret/request/{request_id}", handle_secret_request_poll)
+        app.router.add_delete("/v1/secret/request/{request_id}", handle_secret_request_delete)
 
         # Start server
         sys.stderr.write(

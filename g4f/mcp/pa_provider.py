@@ -60,6 +60,7 @@ import io
 import os as _os
 import sys
 import json
+import re
 import hashlib
 import threading
 import time as _time_module
@@ -69,6 +70,7 @@ import builtins as _builtins
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Type
 from .. import debug
+from ..files import secure_filename
 
 # ---------------------------------------------------------------------------
 # Workspace directory
@@ -82,9 +84,426 @@ def get_workspace_dir() -> Path:
     return workspace
 
 
+def get_user_workspace_dir(user_id: str) -> Path:
+    """Return a per-user workspace subdirectory ``~/.g4f/workspace/users/<user_id>``.
+
+    The directory is created on demand.  ``user_id`` is sanitised so that
+    only alphanumeric characters, ``-`` and ``_`` are kept, preventing path
+    traversal.
+    """
+    if not user_id:
+        return get_workspace_dir()
+    safe_id = re.sub(r"[^a-zA-Z0-9_\-]+", "_", user_id).strip("_") or "anonymous"
+    user_workspace = get_workspace_dir() / "users" / safe_id
+    user_workspace.mkdir(parents=True, exist_ok=True)
+    return user_workspace
+
+
+def get_secret_workspace_dir(user_id: str) -> Path:
+    """Return a per-user *secret* workspace ``~/.g4f/workspace/secret/<user_id>``.
+
+    This is used when a workspace secret is provided.  Files are saved here
+    when the user is logged in; reads fall back to the root workspace when
+    the file does not exist in the secret workspace.
+    """
+    if not user_id:
+        return get_workspace_dir()
+    safe_id = re.sub(r"[^a-zA-Z0-9_\-]+", "_", user_id).strip("_") or "anonymous"
+    secret_workspace = get_workspace_dir() / "secret" / safe_id
+    secret_workspace.mkdir(parents=True, exist_ok=True)
+    return secret_workspace
+
+
+def resolve_workspace_path(
+    rel_path: str,
+    user_id: str = None,
+    workspace_secret: str = None,
+    for_write: bool = False,
+) -> Tuple[Path, Path]:
+    """Resolve a relative path to an actual filesystem path with fallback.
+
+    When *workspace_secret* and *user_id* are provided, writes go to the
+    user's secret workspace and reads first check the secret workspace, then
+    fall back to the root workspace.
+
+    Returns a tuple ``(target, workspace_root)`` where *target* is the
+    resolved path to use and *workspace_root* is the workspace root that
+    contains it (used for containment checks).
+    """
+    root = get_workspace_dir().resolve()
+    if workspace_secret and user_id:
+        user_ws = get_secret_workspace_dir(user_id).resolve()
+        target = (user_ws / rel_path).resolve()
+        if for_write:
+            return target, user_ws
+        # Read: check secret workspace first, fall back to root
+        if target.exists():
+            return target, user_ws
+        # Fall back to root workspace
+        target = (root / rel_path).resolve()
+        return target, root
+    target = (root / rel_path).resolve()
+    return target, root
+
+
 def is_hidden_file(path: str) -> bool:
     """Return True if *path* is a hidden file (starts with a dot)."""
     return any(part.startswith(".") or part.startswith("__") for part in str(path).replace("\\", "/").split("/"))
+
+
+# ---------------------------------------------------------------------------
+# Secret conversation storage
+# ---------------------------------------------------------------------------
+
+def _derive_key(workspace_secret: str) -> bytes:
+    """Derive a 32-byte AES key from the workspace secret via SHA-256."""
+    return hashlib.sha256(workspace_secret.encode("utf-8")).digest()
+
+
+def _encrypt_data(data: bytes, workspace_secret: str) -> bytes:
+    """Encrypt *data* with AES-256-GCM using *workspace_secret*.
+
+    Returns a binary blob: ``nonce (12) || ciphertext || tag (16)``.
+    The nonce is randomly generated for each encryption.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    import os
+
+    key = _derive_key(workspace_secret)
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(key)
+    ciphertext = aesgcm.encrypt(nonce, data, None)
+    return nonce + ciphertext
+
+
+def _decrypt_data(blob: bytes, workspace_secret: str) -> Optional[bytes]:
+    """Decrypt a blob produced by :func:`_encrypt_data`.
+
+    Returns ``None`` if decryption fails (wrong key / corrupted data).
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if len(blob) < 28:  # 12-byte nonce + 16-byte GCM tag minimum
+        return None
+    key = _derive_key(workspace_secret)
+    nonce = blob[:12]
+    ciphertext = blob[12:]
+    aesgcm = AESGCM(key)
+    try:
+        return aesgcm.decrypt(nonce, ciphertext, None)
+    except Exception:
+        return None
+
+
+def _encrypt_json(obj: dict, workspace_secret: str) -> bytes:
+    """Serialise *obj* to JSON and encrypt with AES-256-GCM."""
+    raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return _encrypt_data(raw, workspace_secret)
+
+
+def _decrypt_json(blob: bytes, workspace_secret: str) -> Optional[dict]:
+    """Decrypt a blob and parse the plaintext as JSON."""
+    raw = _decrypt_data(blob, workspace_secret)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _is_encrypted_blob(data: bytes) -> bool:
+    """Heuristic: check if *data* looks like an encrypted binary blob.
+
+    Encrypted files start with the magic prefix ``G4FENC`` followed by
+    a version byte.  Plaintext JSON files start with ``{``.
+    """
+    return data[:6] == b"G4FENC"
+
+
+def _encrypt_json_file(obj: dict, workspace_secret: str) -> bytes:
+    """Encrypt *obj* as JSON with a magic header for easy identification.
+
+    Format: ``G4FENC (6) || version (1) || nonce (12) || ciphertext || tag``
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    import os
+
+    raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    key = _derive_key(workspace_secret)
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(key)
+    ciphertext = aesgcm.encrypt(nonce, raw, None)
+    return b"G4FENC" + b"\x01" + nonce + ciphertext
+
+
+def _decrypt_json_file(data: bytes, workspace_secret: str) -> Optional[dict]:
+    """Decrypt and parse a file produced by :func:`_encrypt_json_file`.
+
+    Falls back to plaintext JSON parsing if the data is not encrypted
+    (for backward compatibility with previously stored plaintext files).
+    """
+    if not _is_encrypted_blob(data):
+        # Plaintext fallback — old files stored before encryption
+        try:
+            return json.loads(data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    version = data[6]
+    if version != 1:
+        return None
+    nonce = data[7:19]
+    ciphertext = data[19:]
+    key = _derive_key(workspace_secret)
+    aesgcm = AESGCM(key)
+    try:
+        raw = aesgcm.decrypt(nonce, ciphertext, None)
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def get_secret_conversation_dir(user_id: str) -> Path:
+    """Return the directory used to store secret conversations for *user_id*.
+
+    Conversations are saved as individual JSON files under
+    ``~/.g4f/workspace/secret/<user_id>/conversations/``.  An index file
+    ``index.json`` lists all stored conversation IDs.
+    """
+    secret_ws = get_secret_workspace_dir(user_id)
+    conv_dir = secret_ws / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    return conv_dir
+
+
+def save_secret_conversation(user_id: str, conversation: dict, workspace_secret: str = None) -> dict:
+    """Save a single conversation to the user's secret workspace.
+
+    *conversation* must contain an ``id`` field.  The conversation is
+    written as ``<id>.json`` (encrypted with AES-256-GCM when
+    *workspace_secret* is provided) and the index file is updated.
+    """
+    conv_id = conversation.get("id")
+    if not conv_id:
+        return {"error": "Conversation must have an 'id' field"}
+    conv_dir = get_secret_conversation_dir(user_id)
+    safe_id = secure_filename(str(conv_id))
+    conv_file = conv_dir / f"{safe_id}.json"
+    if workspace_secret:
+        blob = _encrypt_json_file(conversation, workspace_secret)
+        conv_file.write_bytes(blob)
+    else:
+        conv_file.write_text(json.dumps(conversation, ensure_ascii=False, indent=2), encoding="utf-8")
+    _update_secret_conversation_index(user_id, conversation)
+    return {"saved": True, "id": conv_id, "path": str(conv_file.name), "encrypted": bool(workspace_secret)}
+
+
+def _update_secret_conversation_index(user_id: str, conversation: dict) -> None:
+    """Update the index file with a summary of *conversation*."""
+    conv_dir = get_secret_conversation_dir(user_id)
+    index_file = conv_dir / "index.json"
+    index: list = []
+    if index_file.exists():
+        try:
+            index = json.loads(index_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            index = []
+    conv_id = conversation.get("id")
+    # Remove existing entry for this conversation
+    index = [e for e in index if e.get("id") != conv_id]
+    # Add fresh entry
+    entry = {
+        "id": conv_id,
+        "title": conversation.get("title") or conversation.get("new_title") or "",
+        "updated": conversation.get("updated"),
+        "added": conversation.get("added"),
+        "items_count": len(conversation.get("items", [])),
+    }
+    index.append(entry)
+    # Sort by updated descending
+    index.sort(key=lambda e: e.get("updated") or e.get("added") or 0, reverse=True)
+    index_file.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def list_secret_conversations(user_id: str) -> list:
+    """Return the index of all secret conversations for *user_id*."""
+    conv_dir = get_secret_conversation_dir(user_id)
+    index_file = conv_dir / "index.json"
+    if index_file.exists():
+        try:
+            return json.loads(index_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+    return []
+
+
+def get_secret_conversation(user_id: str, conv_id: str, workspace_secret: str = None) -> Optional[dict]:
+    """Retrieve a single secret conversation by ID.
+
+    If *workspace_secret* is provided, encrypted files are decrypted.
+    Plaintext files (stored before encryption was enabled) are read as-is.
+    """
+    conv_dir = get_secret_conversation_dir(user_id)
+    safe_id = secure_filename(str(conv_id))
+    conv_file = conv_dir / f"{safe_id}.json"
+    if not conv_file.exists():
+        return None
+    try:
+        raw = conv_file.read_bytes()
+    except OSError:
+        return None
+    return _decrypt_json_file(raw, workspace_secret or "")
+
+
+def delete_secret_conversation(user_id: str, conv_id: str) -> bool:
+    """Delete a secret conversation and update the index."""
+    conv_dir = get_secret_conversation_dir(user_id)
+    safe_id = secure_filename(str(conv_id))
+    conv_file = conv_dir / f"{safe_id}.json"
+    deleted = False
+    if conv_file.exists():
+        conv_file.unlink()
+        deleted = True
+    # Update index
+    index_file = conv_dir / "index.json"
+    if index_file.exists():
+        try:
+            index = json.loads(index_file.read_text(encoding="utf-8"))
+            index = [e for e in index if e.get("id") != conv_id]
+            index_file.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (json.JSONDecodeError, OSError):
+            pass
+    return deleted
+
+# ---------------------------------------------------------------------------
+# Cross-device workspace secret sharing
+# ---------------------------------------------------------------------------
+
+def _get_secret_requests_dir(user_id: str) -> Path:
+    """Return the directory for pending secret-sharing requests.
+
+    Stored under ``~/.g4f/workspace/secret/<user_id>/secret_requests/``.
+    """
+    secret_ws = get_secret_workspace_dir(user_id)
+    req_dir = secret_ws / "secret_requests"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    return req_dir
+
+
+def create_secret_request(user_id: str, device_name: str = "") -> dict:
+    """Create a pending secret-sharing request from a new device.
+
+    Returns a dict with ``request_id`` and ``status``.  The online device
+    polls ``list_secret_requests`` to discover it.
+    """
+    import uuid
+
+    request_id = uuid.uuid4().hex[:12]
+    req_dir = _get_secret_requests_dir(user_id)
+    req_file = req_dir / f"{request_id}.json"
+    now = _time_module.time()
+    request_data = {
+        "id": request_id,
+        "user_id": user_id,
+        "device_name": device_name or "unknown",
+        "status": "pending",  # pending -> confirmed -> completed
+        "created": now,
+        "expires": now + 300,  # 5-minute expiry
+        "secret": None,  # filled in by the confirming device
+    }
+    req_file.write_text(json.dumps(request_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"request_id": request_id, "status": "pending"}
+
+
+def list_secret_requests(user_id: str) -> list:
+    """List all pending secret-sharing requests for *user_id*.
+
+    Expired requests (older than 5 minutes) are automatically removed.
+    """
+    req_dir = _get_secret_requests_dir(user_id)
+    now = _time_module.time()
+    requests = []
+    for req_file in req_dir.glob("*.json"):
+        try:
+            data = json.loads(req_file.read_text(encoding="utf-8"))
+            if data.get("expires", 0) < now and data.get("status") != "completed":
+                req_file.unlink(missing_ok=True)
+                continue
+            # Don't expose the secret in the list
+            safe = {k: v for k, v in data.items() if k != "secret"}
+            requests.append(safe)
+        except (json.JSONDecodeError, OSError):
+            continue
+    requests.sort(key=lambda r: r.get("created", 0), reverse=True)
+    return requests
+
+
+def confirm_secret_request(user_id: str, request_id: str, workspace_secret: str) -> dict:
+    """Confirm a pending secret request by providing the workspace secret.
+
+    Called by the online device that already has the secret.
+    """
+    req_dir = _get_secret_requests_dir(user_id)
+    safe_id = secure_filename(str(request_id))
+    req_file = req_dir / f"{safe_id}.json"
+    if not req_file.exists():
+        return {"error": "Request not found"}
+    try:
+        data = json.loads(req_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"error": "Invalid request file"}
+    if data.get("status") != "pending":
+        return {"error": f"Request is not pending (status={data.get('status')})"}
+    data["status"] = "confirmed"
+    data["secret"] = workspace_secret
+    data["confirmed_at"] = _time_module.time()
+    req_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"confirmed": True, "request_id": request_id}
+
+
+def poll_secret_request(user_id: str, request_id: str) -> dict:
+    """Poll a secret request to check if it has been confirmed.
+
+    Returns the request data including the secret if confirmed.
+    If the secret has been retrieved, the request is marked as completed
+    and cleaned up.
+    """
+    req_dir = _get_secret_requests_dir(user_id)
+    safe_id = secure_filename(str(request_id))
+    req_file = req_dir / f"{safe_id}.json"
+    if not req_file.exists():
+        return {"status": "not_found"}
+    try:
+        data = json.loads(req_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"status": "error", "error": "Invalid request file"}
+    now = _time_module.time()
+    if data.get("expires", 0) < now and data.get("status") != "completed":
+        req_file.unlink(missing_ok=True)
+        return {"status": "expired"}
+    if data.get("status") == "confirmed":
+        # Mark as completed and clean up
+        data["status"] = "completed"
+        req_file.unlink(missing_ok=True)
+        return {
+            "status": "confirmed",
+            "secret": data.get("secret"),
+            "request_id": request_id,
+        }
+    return {"status": data.get("status", "pending"), "request_id": request_id}
+
+
+def delete_secret_request(user_id: str, request_id: str) -> bool:
+    """Delete (cancel) a secret-sharing request."""
+    req_dir = _get_secret_requests_dir(user_id)
+    safe_id = secure_filename(str(request_id))
+    req_file = req_dir / f"{safe_id}.json"
+    if req_file.exists():
+        req_file.unlink()
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

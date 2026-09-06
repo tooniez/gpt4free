@@ -512,7 +512,7 @@ class FileReadTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir
+        from .pa_provider import resolve_workspace_path
 
         rel_path = arguments.get("path", "")
         if not rel_path:
@@ -537,9 +537,12 @@ class FileReadTool(MCPTool):
             if start_line is not None and end_line < start_line:
                 return {"error": "endLine must be >= startLine"}
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
         try:
-            target = (workspace / rel_path).resolve()
+            target, workspace = resolve_workspace_path(
+                rel_path, user_id=user_id, workspace_secret=workspace_secret, for_write=False
+            )
             if not str(target).startswith(str(workspace)):
                 return {"error": "Access outside the workspace is not allowed"}
             if not target.exists():
@@ -608,12 +611,18 @@ class FileListTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir, is_hidden_file
+        from .pa_provider import get_workspace_dir, get_secret_workspace_dir, is_hidden_file
 
         rel_path = arguments.get("path", "") or ""
         recursive = bool(arguments.get("recursive", False))
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
+        root = get_workspace_dir().resolve()
+        if workspace_secret and user_id:
+            workspace = get_secret_workspace_dir(user_id).resolve()
+        else:
+            workspace = root
         try:
             target = (workspace / rel_path).resolve() if rel_path else workspace
             if not str(target).startswith(str(workspace)):
@@ -683,15 +692,18 @@ class FileDeleteTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir
+        from .pa_provider import resolve_workspace_path
 
         rel_path = arguments.get("path", "")
         if not rel_path:
             return {"error": "path parameter is required"}
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
         try:
-            target = (workspace / rel_path).resolve()
+            target, workspace = resolve_workspace_path(
+                rel_path, user_id=user_id, workspace_secret=workspace_secret, for_write=True
+            )
             if not str(target).startswith(str(workspace)):
                 return {"error": "Access outside the workspace is not allowed"}
             if not target.exists():
@@ -731,15 +743,18 @@ class CreateDirectoryTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir
+        from .pa_provider import resolve_workspace_path
 
         rel_path = arguments.get("dirPath", "")
         if not rel_path:
             return {"error": "dirPath parameter is required"}
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
         try:
-            target = (workspace / rel_path).resolve()
+            target, workspace = resolve_workspace_path(
+                rel_path, user_id=user_id, workspace_secret=workspace_secret, for_write=True
+            )
             if not str(target).startswith(str(workspace)):
                 return {"error": "Access outside the workspace is not allowed"}
             target.mkdir(parents=True, exist_ok=True)
@@ -777,7 +792,7 @@ class CreateFileTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir
+        from .pa_provider import resolve_workspace_path
 
         rel_path = arguments.get("filePath", "")
         content = arguments.get("content")
@@ -787,9 +802,12 @@ class CreateFileTool(MCPTool):
         if content is None:
             return {"error": "content parameter is required"}
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
         try:
-            target = (workspace / rel_path).resolve()
+            target, workspace = resolve_workspace_path(
+                rel_path, user_id=user_id, workspace_secret=workspace_secret, for_write=True
+            )
             if not str(target).startswith(str(workspace)):
                 return {"error": "Access outside the workspace is not allowed"}
             if target.exists():
@@ -845,7 +863,7 @@ class FileWriteTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir
+        from .pa_provider import resolve_workspace_path
 
         rel_path = arguments.get("path", "")
         content = arguments.get("content")
@@ -856,9 +874,12 @@ class FileWriteTool(MCPTool):
         if content is None:
             return {"error": "content parameter is required"}
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
         try:
-            target = (workspace / rel_path).resolve()
+            target, workspace = resolve_workspace_path(
+                rel_path, user_id=user_id, workspace_secret=workspace_secret, for_write=True
+            )
             if not str(target).startswith(str(workspace)):
                 return {"error": "Access outside the workspace is not allowed"}
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -913,7 +934,7 @@ class ReplaceStringInFileTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir
+        from .pa_provider import resolve_workspace_path
 
         rel_path = arguments.get("filePath", "")
         old_string = arguments.get("oldString")
@@ -926,9 +947,12 @@ class ReplaceStringInFileTool(MCPTool):
         if new_string is None:
             return {"error": "newString parameter is required"}
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
         try:
-            target = (workspace / rel_path).resolve()
+            target, workspace = resolve_workspace_path(
+                rel_path, user_id=user_id, workspace_secret=workspace_secret, for_write=False
+            )
             if not str(target).startswith(str(workspace)):
                 return {"error": "Access outside the workspace is not allowed"}
             if not target.exists():
@@ -1051,7 +1075,7 @@ class FileSearchGlobTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir, is_hidden_file
+        from .pa_provider import get_workspace_dir, get_secret_workspace_dir, is_hidden_file
 
         pattern = arguments.get("query", "")
         max_results = int(arguments.get("maxResults", 50))
@@ -1059,7 +1083,10 @@ class FileSearchGlobTool(MCPTool):
         if not pattern:
             return {"error": "query parameter is required"}
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
+        root = get_workspace_dir().resolve()
+        workspace = get_secret_workspace_dir(user_id).resolve() if (workspace_secret and user_id) else root
         try:
             matches = []
             for entry in workspace.rglob("*"):
@@ -1120,7 +1147,7 @@ class GrepSearchTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir, is_hidden_file
+        from .pa_provider import get_workspace_dir, get_secret_workspace_dir, is_hidden_file
 
         pattern = arguments.get("query", "")
         is_regexp = bool(arguments.get("isRegexp", False))
@@ -1130,7 +1157,10 @@ class GrepSearchTool(MCPTool):
         if not pattern:
             return {"error": "query parameter is required"}
 
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
+        root = get_workspace_dir().resolve()
+        workspace = get_secret_workspace_dir(user_id).resolve() if (workspace_secret and user_id) else root
         try:
             if is_regexp:
                 try:
@@ -1393,16 +1423,19 @@ class ApplyPatchTool(MCPTool):
         }
 
     async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        from .pa_provider import get_workspace_dir
+        from .pa_provider import resolve_workspace_path
         from .apply_patch import apply_patch_with_fallback
 
         target_path = arguments.get("target_path", "")
         patch_content = arguments.get("patch_content", "")
         backup = bool(arguments.get("backup", False))
         dry_run = bool(arguments.get("dry_run", False))
-        workspace = get_workspace_dir().resolve()
+        user_id = arguments.get("user_id")
+        workspace_secret = arguments.get("workspace_secret")
         try:
-            target = (workspace / target_path).resolve()
+            target, workspace = resolve_workspace_path(
+                target_path, user_id=user_id, workspace_secret=workspace_secret, for_write=False
+            )
             if not str(target).startswith(str(workspace)):
                 return {"error": "Access outside the workspace is not allowed"}
             if not target.exists():

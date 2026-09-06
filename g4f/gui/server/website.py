@@ -320,14 +320,38 @@ class Website:
         """
 
         # Screenshot / logo section
-        logo_url = f"/screenshot?url={p.get('url', (p.get('base_url', p.get('baseUrl', ''))).replace('https://', '').replace('http://', '').replace('playground.ai.', '').replace('console.', '').replace('api.', '').replace('router.', '').split('/')[0])}"
+        logo_url = f"{p.get('url', (p.get('base_url', p.get('baseUrl', '')))).replace('playground.ai.', '').replace('https://', '').replace('http://', '').replace('api.', '').replace('console.', '').replace('api.', '').replace('router.', '').split('/')[0]}"
+        logo_url = f"api.airforce" if logo_url == "airforce" else logo_url
+        logo_url = f"/screenshot?url=https://{logo_url}"
         screenshot_html = f"""
         <div class="screenshot-section">
-            <img src="{logo_url}" alt="{escape(p['name'])} logo" class="provider-logo"
-                 onerror="this.onerror=null;this.src='https://image.thum.io/get/width/600/{escape(p['url'] or '')}'"
+            <img data-src="{logo_url}" alt="{escape(p['name'])} logo" class="provider-logo"
                  style="max-width:100%;border-radius:8px;border:1px solid var(--card-border)" />
-            <p class="screenshot-caption">Logo from g4f.space / screenshot from {escape(p['url'] or 'N/A')}</p>
+            <p class="screenshot-caption">Load screenshot from {escape(p['url'] or 'N/A')}</p>
         </div>
+        <script>
+            const img = document.querySelector('img[data-src="{logo_url}"]');
+            let n = 1;
+            const orgSrc = img.dataset.src;
+            img.onload = () => {{
+                n =  n + 1;
+                if (n <= 3) {{
+                    setTimeout(() => {{
+                        img.src = orgSrc + `_${{n}}.jpg`;
+                    }}, 1000);
+                }}
+            }};
+            img.onerror = () => {{
+                if (n === 1) {{
+                    img.src = 'https://image.thum.io/get/width/600/{logo_url}';
+                    return;
+                }}
+                if (imgs.src == orgSrc) return;
+                n = 3; // Stop carousel on error
+                img.src = orgSrc;
+            }};
+            img.src = img.dataset.src;
+        </script>
         """
 
         detail_html = f"""

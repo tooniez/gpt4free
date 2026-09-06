@@ -57,7 +57,7 @@ import platform
 import subprocess
 import time
 import urllib.request
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, AsyncIterator
 import hashlib
 from urllib.parse import urlparse
 import datetime
@@ -730,7 +730,8 @@ class CDPSession:
 """
         try:
             rect = await self.evaluate_js(js_code)
-            debug.log(f"Accept button rect: {rect}")
+            if rect:
+                debug.log(f"Accept button rect: {rect}")
             if rect and isinstance(rect, list) and len(rect) == 2:
                 await self.click(int(rect[0]), int(rect[1]))
                 return True
@@ -780,18 +781,30 @@ class CDPSession:
             await self.call("Network.enable")
             await self.call("Runtime.enable")
 
-    async def capture_screenshot(self, url: str) -> bytes:
+    async def capture_screenshot(self, url: str, n: int = 3) -> AsyncIterator[str]:
         """Navigate to a URL and capture a screenshot, caching the result."""
+        result = None
+        for i in range(n):
+            await asyncio.sleep(1)
+            try:
+                result = await self._capture_screenshot_impl(url, n - i)
+                if url.endswith(f"_{n - i}.jpg"):
+                    return result
+            except Exception as e:
+                debug.log(f"Screenshot #{i+1} failed: {e}")
+        return result
+    
+    async def _capture_screenshot_impl(self, url: str, n: int) -> str:
+        url_without_suffix = url[:-6] if url.endswith("_2.jpg") or url.endswith("_3.jpg") else url
         datekey = datetime.date.today().isoformat()
         screenshot_dir = get_screenshot_dir(datekey)
-        filename = f"{secure_filename(url.replace('https://', '').replace('http://', ''))}.jpg"
-        filepath = os.path.join(screenshot_dir, filename)
-
+        # Use original URL for filename to distinguish between similar URLs
+        filepath = os.path.join(screenshot_dir, f"{secure_filename(url_without_suffix.replace('https://', '').replace('http://', '').replace('www.', ''))}{'.jpg' if n == 1 else f'_{n}.jpg'}")
         if os.path.exists(filepath):
+            debug.log(f"Screenshot already exists: {filepath}")
             return filepath
-
-        debug.log(f"Capturing screenshot for {url} ...")
-        await self.navigate(url)
+        url_with_noads = f"{url_without_suffix}&noads={int(time.time())}" if "?" in url_without_suffix else f"{url_without_suffix}?noads={int(time.time())}"
+        await self.navigate(url_with_noads)
         # Wait for network activity to settle before capturing
         await self.wait_for_network_idle(idle_time=5, timeout=15.0)
         if await self.evaluate_js('!document.doctype'):
@@ -819,6 +832,15 @@ class CDPSession:
             output = BytesIO()
             image.save(output, format="JPEG", quality=85, optimize=True)
             image_bytes = output.getvalue()
+
+        # Try to click any "Accept" or "Einwilligen" cookie consent buttons
+        for _ in range(5):
+            debug.log("Attempting to click accept button...")
+            await asyncio.sleep(1)
+            if await self.click_accept_button():
+                debug.log("Clicked accept button.")
+                await asyncio.sleep(1)
+                break
         
         Path(filepath).write_bytes(image_bytes)
         return filepath
