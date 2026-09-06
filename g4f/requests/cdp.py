@@ -786,10 +786,9 @@ class CDPSession:
         screenshot_dir = get_screenshot_dir(datekey)
         filename = f"{secure_filename(url.replace('https://', '').replace('http://', ''))}.jpg"
         filepath = os.path.join(screenshot_dir, filename)
-        debug.log(f"Screenshot path: {filepath}")
 
         if os.path.exists(filepath):
-            return Path(filepath).read_bytes()
+            return filepath
 
         debug.log(f"Capturing screenshot for {url} ...")
         await self.navigate(url)
@@ -822,7 +821,7 @@ class CDPSession:
             image_bytes = output.getvalue()
         
         Path(filepath).write_bytes(image_bytes)
-        return image_bytes
+        return filepath
 
     async def close(self):
         """Close WebSocket session, close the specific target tab, and close the browser."""
