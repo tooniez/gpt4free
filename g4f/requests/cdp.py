@@ -783,6 +783,13 @@ class CDPSession:
 
     async def capture_screenshot(self, url: str, n: int = 3) -> AsyncIterator[str]:
         """Navigate to a URL and capture a screenshot, caching the result."""
+        url_without_suffix = url[:-6] if url.endswith("_2.jpg") or url.endswith("_3.jpg") else url
+        url_with_noads = f"{url_without_suffix}&noads={int(time.time())}" if "?" in url_without_suffix else f"{url_without_suffix}?noads={int(time.time())}"
+        await self.navigate(url_with_noads)
+
+        if await self.evaluate_js('!document.doctype'):
+            raise RuntimeError(f"Failed to load page {url} for screenshot, document.doctype={await self.evaluate_js('String(document.doctype)')}")
+
         result = None
         for i in range(n):
             await asyncio.sleep(1)
@@ -803,20 +810,17 @@ class CDPSession:
         if os.path.exists(filepath):
             debug.log(f"Screenshot already exists: {filepath}")
             return filepath
-        url_with_noads = f"{url_without_suffix}&noads={int(time.time())}" if "?" in url_without_suffix else f"{url_without_suffix}?noads={int(time.time())}"
-        await self.navigate(url_with_noads)
         # Wait for network activity to settle before capturing
         await self.wait_for_network_idle(idle_time=5, timeout=15.0)
-        if await self.evaluate_js('!document.doctype'):
-            raise RuntimeError(f"Failed to load page {url} for screenshot, doctype={await self.evaluate_js('String(document.doctype)')}")
         # Try to click any "Accept" or "Einwilligen" cookie consent buttons
-        for _ in range(5):
-            debug.log("Attempting to click accept button...")
-            await asyncio.sleep(1)
-            if await self.click_accept_button():
-                debug.log("Clicked accept button.")
+        if n != 1:
+            for _ in range(2):
+                debug.log("Attempting to click accept button...")
                 await asyncio.sleep(1)
-                break
+                if await self.click_accept_button():
+                    debug.log("Clicked accept button.")
+                    await asyncio.sleep(1)
+                    break
         await self.wait_for_network_idle(idle_time=5, timeout=15.0)
         result = await self.call("Page.captureScreenshot")
         image_bytes = base64.b64decode(result["data"])

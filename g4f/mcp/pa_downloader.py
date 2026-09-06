@@ -378,7 +378,7 @@ def auto_download_pa_providers(
         return []
 
     if written:
-        print(f"pa-providers: auto-downloaded {len(written)} provider(s) from {repo}")
+        pass
     else:
         debug.log("pa-providers: auto-download found nothing new to install")
     return written
