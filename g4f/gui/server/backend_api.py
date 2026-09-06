@@ -157,14 +157,13 @@ class Backend_Api(Api):
                     logger.error(f"Secret validation failed: {e}")
                     return False
 
-            @app.route("/backend-api/v2/public-key", methods=["GET", "POST"])
+            @app.route("/backend-api/v2/public-key", methods=["GET"])
             def get_public_key():
                 if not has_crypto:
                     return (
                         jsonify(
                             {"error": {"message": "Crypto support is not available"}}
                         ),
-                        501,
                     )
                 # try:
                 #     diff = time.time() - int(base64.b64decode(request.cookies.get("fingerprint")).decode())
@@ -173,13 +172,15 @@ class Backend_Api(Api):
                 # if diff > 60 * 60 * 2:
                 #     return jsonify({"error": {"message": "Please refresh the page"}}), 403
                 # Send the public key to the client for encryption
-                return jsonify(
+                response = jsonify(
                     {
                         "public_key": public_key_pem.decode(),
                         "data": encrypt_data(sub_public_key, str(int(time.time()))),
                         "user": request.headers.get("x-user", "error"),
                     }
                 )
+                response.headers["cache-control"] = "no-cache"
+                return response
 
         @app.route("/pa/providers", methods=["GET"])
         async def pa_providers():

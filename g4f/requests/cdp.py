@@ -287,6 +287,8 @@ def get_shared_browser(host: str, preferred_port: int, headless: bool = True) ->
             "--disable-features=PrivacySandboxSettings4",
             "--disable-blink-features=AutomationControlled",
             "--remote-allow-origins=*",
+            "--disable-web-security",
+            "--disable-features=IsolateOrigins,site-per-process",
         ]
         if headless:
             cmd.append("--headless=new")
@@ -670,34 +672,70 @@ class CDPSession:
         return False
 
     async def click_accept_button(self) -> bool:
-        """Find and click an 'Accept' or 'Einwilligen' button."""
+        """Find and click an 'Accept' or 'Einwilligen' button, including inside iframes."""
         js_code = """
-        (() => {
-            const buttons = document.querySelectorAll('button, input[type="submit"]');
+(() => {
+    const targetTexts = ['Accept', 'Accept all', 'Einwilligen', 'Alle akzeptieren', 'Zustimmen und weiter'];
+
+    function searchDocument(doc, offsetX = 0, offsetY = 0) {
+        try {
+            if (!doc) return null;
+
+            // 1. Search buttons in the current document
+            const buttons = doc.querySelectorAll('button, input[type="submit"], [role="button"]');
             for (let button of buttons) {
-                const text = button.textContent.trim();
-                if (text === 'Accept' || text == 'Accept all' || text === 'Einwilligen' || text === 'Alle akzeptieren') {
+                const text = (button.innerText || button.value || button.textContent || '').trim();
+                if (targetTexts.includes(text)) {
+                    
+                    // NEU: Scrollt das Element/den Container in den sichtbaren Bereich
+                    button.scrollIntoView({ block: 'center', inline: 'center' });
+                    
+                    // Wichtig: Nach dem Scrollen müssen die Koordinaten neu berechnet werden!
                     const rect = button.getBoundingClientRect();
-                    return {
-                        x: rect.left + window.scrollX,
-                        y: rect.top + window.scrollY,
-                        width: rect.width,
-                        height: rect.height
-                    };
+                    
+                    if (rect.width > 0 && rect.height > 0) {
+                        return [
+                            offsetX + rect.left + rect.width / 2,
+                            offsetY + rect.top + rect.height / 2
+                        ];
+                    }
                 }
             }
-            return null;
-        })()
-        """
+
+            // 2. Search inside nested iframes
+            const iframes = doc.querySelectorAll('iframe');
+            for (let iframe of iframes) {
+                try {
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+                    if (iframeDoc) {
+                        const iframeRect = iframe.getBoundingClientRect();
+                        const res = searchDocument(
+                            iframeDoc,
+                            offsetX + iframeRect.left,
+                            offsetY + iframeRect.top
+                        );
+                        if (res) return res;
+                    }
+                } catch (e) {
+                    // Cross-origin iframe security restriction
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // window.scrollX/Y wird am Ende aufgeschlagen, falls du absolute Page-Koordinaten brauchst
+    return searchDocument(document, window.scrollX, window.scrollY);
+})()
+"""
         try:
             rect = await self.evaluate_js(js_code)
-            if rect and isinstance(rect, dict) and rect.get("width", 0) > 0:
-                center_x = int(rect["x"] + rect["width"] / 2)
-                center_y = int(rect["y"] + rect["height"] / 2)
-                await self.click(center_x, center_y)
+            debug.log(f"Accept button rect: {rect}")
+            if rect and isinstance(rect, list) and len(rect) == 2:
+                await self.click(int(rect[0]), int(rect[1]))
                 return True
         except Exception as e:
-            logger.debug(f"Failed to click accept button: {e}")
+            debug.log(f"Failed to click accept button: {e}")
         return False
 
     async def bypass_turnstile(self):
@@ -746,7 +784,7 @@ class CDPSession:
         """Navigate to a URL and capture a screenshot, caching the result."""
         datekey = datetime.date.today().isoformat()
         screenshot_dir = get_screenshot_dir(datekey)
-        filename = f"{secure_filename(url.replace('https://', '').replace('http://', ''))}.png"
+        filename = f"{secure_filename(url.replace('https://', '').replace('http://', ''))}.jpg"
         filepath = os.path.join(screenshot_dir, filename)
         debug.log(f"Screenshot path: {filepath}")
 
@@ -759,22 +797,28 @@ class CDPSession:
         await self.wait_for_network_idle(idle_time=5, timeout=15.0)
         if await self.evaluate_js('!document.doctype'):
             raise RuntimeError(f"Failed to load page {url} for screenshot, doctype={await self.evaluate_js('String(document.doctype)')}")
-        await asyncio.sleep(3)
         # Try to click any "Accept" or "Einwilligen" cookie consent buttons
-        await self.click_accept_button()
-        await asyncio.sleep(0.5)
+        for _ in range(5):
+            debug.log("Attempting to click accept button...")
+            await asyncio.sleep(1)
+            if await self.click_accept_button():
+                debug.log("Clicked accept button.")
+                await asyncio.sleep(1)
+                break
+        await self.wait_for_network_idle(idle_time=5, timeout=15.0)
         result = await self.call("Page.captureScreenshot")
         image_bytes = base64.b64decode(result["data"])
         
-        # Resize to 1200x675
+        # Resize to 1200x630 and save as JPEG to reduce file size
         if has_pillow:
             from io import BytesIO
             image = Image.open(BytesIO(image_bytes))
             image = image.resize((1200, 630), Image.Resampling.LANCZOS)
             width, height = image.size
             image = image.crop((0, 0, max(0, width - 14), height))
+            image = image.convert("RGB")  # JPEG does not support alpha channel
             output = BytesIO()
-            image.save(output, format="PNG")
+            image.save(output, format="JPEG", quality=85, optimize=True)
             image_bytes = output.getvalue()
         
         Path(filepath).write_bytes(image_bytes)
@@ -1083,7 +1127,7 @@ class SyncCDPSession:
         """Navigate to a URL and capture a screenshot, caching the result."""
         datekey = datetime.date.today().isoformat()
         screenshots_dir = get_screenshot_dir(datekey)
-        filename = secure_filename(url)
+        filename = f"{secure_filename(url)}.jpg"
         filepath = os.path.join(screenshots_dir, filename)
 
         if os.path.exists(filepath):
@@ -1098,15 +1142,16 @@ class SyncCDPSession:
         result = self.call("Page.captureScreenshot")
         image_bytes = base64.b64decode(result["data"])
         
-        # Resize to 1200x675
+        # Resize to 1200x675 and save as JPEG to reduce file size
         if has_pillow:
             from io import BytesIO
             image = Image.open(BytesIO(image_bytes))
             image = image.resize((1200, 675), Image.Resampling.LANCZOS)
             width, height = image.size
             image = image.crop((0, 0, max(0, width - 10), height))
+            image = image.convert("RGB")  # JPEG does not support alpha channel
             output = BytesIO()
-            image.save(output, format="PNG")
+            image.save(output, format="JPEG", quality=85, optimize=True)
             image_bytes = output.getvalue()
         
         Path(filepath).write_bytes(image_bytes)

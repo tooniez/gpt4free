@@ -320,7 +320,7 @@ class Website:
         """
 
         # Screenshot / logo section
-        logo_url = f"/screenshot?url={p.get('url', (p.get('base_url', p.get('baseUrl', ''))).replace('https://', '').replace('http://', '').replace('playground.ai.', '').replace('api.', '').replace('router.', '').split('/')[0])}"
+        logo_url = f"/screenshot?url={p.get('url', (p.get('base_url', p.get('baseUrl', ''))).replace('https://', '').replace('http://', '').replace('playground.ai.', '').replace('console.', '').replace('api.', '').replace('router.', '').split('/')[0])}"
         screenshot_html = f"""
         <div class="screenshot-section">
             <img src="{logo_url}" alt="{escape(p['name'])} logo" class="provider-logo"
