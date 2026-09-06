@@ -675,7 +675,7 @@ class CDPSession:
         """Find and click an 'Accept' or 'Einwilligen' button, including inside iframes."""
         js_code = """
 (() => {
-    const targetTexts = ['Accept', 'Accept all', 'Einwilligen', 'Alle akzeptieren', 'Zustimmen und weiter'];
+    const targetTexts = ['Accept', 'Accept all', 'Accept All', 'Einwilligen', 'Alle akzeptieren', 'Zustimmen und weiter', 'Zustimmen'];
 
     function searchDocument(doc, offsetX = 0, offsetY = 0) {
         try {
